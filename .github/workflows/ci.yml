@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check JavaScript syntax
+        run: |
+          set -e
+          for f in $(find webui/static/js -name '*.js' | sort); do
+            node --input-type=module --check < "$f"
+            echo "ok $f"
+          done
+
+      - name: Compile webui Python
+        run: python3 -m compileall -q webui
+
+      - name: Verify static entry points
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path("webui/static")
+          for rel in (
+              "index.html",
+              "app.css",
+              "js/app.js",
+              "js/api.js",
+              "js/releases.js",
+              "js/pages/settings.js",
+          ):
+              assert (root / rel).is_file(), rel
+          print("static entry points ok")
+          PY
