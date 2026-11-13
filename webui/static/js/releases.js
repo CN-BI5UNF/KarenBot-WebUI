@@ -106,10 +106,12 @@ function notesBlock(release) {
 }
 
 function releaseCard(release, { busy, onApply }) {
-  const title = release.name || release.tag;
-  const actionLabel = release.relation === 'older'
-    ? '回退到此版本'
-    : (release.relation === 'diverged' ? '切换到此版本' : '更新到此版本');
+  const title = release.name || release.release_tag || release.tag;
+  const actionLabel = release.prerelease
+    ? '安装 Pre-release'
+    : (release.relation === 'older'
+      ? '回退到此版本'
+      : (release.relation === 'diverged' ? '切换到此版本' : '更新到此版本'));
   const compat = release.compat || {};
   // 当前正在使用的版本即使没有 manifest，也不在列表里报“不可应用”。
   const blocked = !release.is_current && compat.compatible === false;
@@ -125,6 +127,12 @@ function releaseCard(release, { busy, onApply }) {
     h('div', { class: 'release-head' },
       h('div', { class: 'release-title-row' },
         h('strong', { class: 'release-title' }, title),
+        release.component_label
+          ? h('span', { class: 'badge' }, release.component_label)
+          : null,
+        release.prerelease
+          ? h('span', { class: 'badge warn' }, 'Pre-release')
+          : null,
         blocked
           ? h('span', {
             class: 'badge warn',
@@ -134,7 +142,7 @@ function releaseCard(release, { busy, onApply }) {
         release.is_current ? h('span', { class: 'badge' }, '正在使用') : null,
       ),
       h('div', { class: 'release-meta' },
-        h('span', { class: 'mono' }, release.tag),
+        h('span', { class: 'mono' }, release.release_tag || release.tag),
         release.commit_short ? h('span', { class: 'mono' }, release.commit_short) : null,
         release.published_at
           ? h('span', {}, formatDateTime(release.published_at))
@@ -222,14 +230,22 @@ export async function renderReleaseList(
   function renderList() {
     if (!listing) return;
     const releases = listing.releases || [];
-    if (!releases.length) {
-      fill(listHost, empty('远端还没有 Release；可以先创建一个版本 tag。'));
-      return;
+    const errors = listing.errors || {};
+    const nodes = [];
+    if (Object.keys(errors).length) {
+      nodes.push(h('p', { class: 'field-help danger-text' },
+        '部分仓库读取失败：'
+        + Object.entries(errors).map(([key, value]) => `${key}: ${value}`).join('；')));
     }
-    fill(listHost, ...releases.map((release) => releaseCard(release, {
-      busy,
-      onApply: applyRelease,
-    })));
+    if (!releases.length) {
+      nodes.push(empty('远端还没有 Release；可以先创建一个版本 tag。'));
+    } else {
+      nodes.push(...releases.map((release) => releaseCard(release, {
+        busy,
+        onApply: applyRelease,
+      })));
+    }
+    fill(listHost, ...nodes);
   }
 
   async function applyRelease(release) {
@@ -268,10 +284,11 @@ export async function renderReleaseList(
       }
       const payload = await endpoints.updateApply({
         confirmation_token: checked.confirmation_token,
-        target_sha: checked.target_commit,
+        target_sha: checked.target_commit || '',
         confirm_branch_switch: true,
         confirm_rollback: needsExtraConfirm,
         defer_restart: true,
+        acknowledge_prerelease: !!release.prerelease,
       });
       applied = true;
       setMessage(payload.message || '更新完成；请重启后端加载新代码。', 'ok');
@@ -291,6 +308,10 @@ export async function renderReleaseList(
         if (!restarted) {
           setMessage('更新已应用；可在此页点击“重启后端”加载新代码。', 'ok');
         }
+      }
+      if (payload.reload_required && !payload.restart_required) {
+        setMessage('前端模块已更新；正在刷新页面…', 'ok');
+        setTimeout(() => window.location.reload(), 800);
       }
     } catch (e) {
       setMessage(`操作失败：${e.message}`, 'bad');

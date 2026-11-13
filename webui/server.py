@@ -53,6 +53,7 @@ def create_app(host: RuntimeHost, auth: TokenAuth) -> FastAPI:
         version=__version__,
         public_prefixes=PUBLIC_PREFIXES,
         docs=True,
+        frontend="webui",
     )
     _install_static_cache_headers(app)
     _install_routes(app)
