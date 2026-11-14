@@ -86,10 +86,10 @@ export const api = {
   get: (path, options) => request('GET', path, undefined, options),
   post: (path, body, options) => request('POST', path, body, options),
   patch: (path, body, options) => request('PATCH', path, body, options),
-  put: (path, body) => request('PUT', path, body),
-  del: (path) => request('DELETE', path),
-  raw: (path) => request('GET', path, undefined, { raw: true }),
-  upload: (path, formData) => request('POST', path, formData),
+  put: (path, body, options) => request('PUT', path, body, options),
+  del: (path, options) => request('DELETE', path, undefined, options),
+  raw: (path, options) => request('GET', path, undefined, { ...(options || {}), raw: true }),
+  upload: (path, formData, options) => request('POST', path, formData, options),
 };
 
 export const endpoints = {
@@ -127,6 +127,8 @@ export const endpoints = {
   knowledgeDelete: (id) => api.del(`/api/knowledge/${encodeURIComponent(id)}`),
   knowledgeResearch: (payload) =>
     api.post('/api/knowledge/research', payload, { timeoutMs: 150000 }),
+  knowledgeDedupe: (payload = {}) =>
+    api.post('/api/knowledge/dedupe', payload, { timeoutMs: 60000 }),
   knowledgeTrends: (payload = {}) =>
     api.post('/api/knowledge/trends', payload, { timeoutMs: 300000 }),
   stopRuntime: () => api.post('/api/system/stop'),
@@ -150,6 +152,17 @@ export const endpoints = {
   // 结构化显示项（工具调用↔结果已配对、回执已去重），q 直接是查询串
   display: (query) =>
     api.get(`/api/chats/display?${query}`, { timeoutMs: CHAT_REQUEST_TIMEOUT_MS }),
+  chatDisplayPage: (params = {}) => {
+    const q = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== '') {
+        q.set(key, String(value));
+      }
+    }
+    return api.get(`/api/chats/display/page?${q.toString()}`, {
+      timeoutMs: CHAT_REQUEST_TIMEOUT_MS,
+    });
+  },
   timeline: (id = '', limit = 100) =>
     api.get(
       `/api/chats/timeline?conversation_id=${encodeURIComponent(id)}&limit=${limit}`,
@@ -182,6 +195,7 @@ export const endpoints = {
   activatePersona: (name) => api.post(`/api/personas/${encodeURIComponent(name)}/activate`),
   deletePersona: (name) => api.del(`/api/personas/${encodeURIComponent(name)}`),
   personaPrompt: (name) => api.get(`/api/personas/${encodeURIComponent(name)}/prompt`),
+  personaExportUrl: (name) => `/api/personas/${encodeURIComponent(name)}/export`,
   personaAppearance: (name) =>
     api.get(`/api/personas/${encodeURIComponent(name)}/appearance`),
   personaAppearanceUrl: (name, version = '', imageId = '') => {
@@ -246,6 +260,10 @@ export const endpoints = {
     }),
   workspaceFileRawUrl: (path) =>
     `/api/workspace/files/raw?path=${encodeURIComponent(path)}`,
+  workspaceFileDownloadUrl: (path) =>
+    `/api/workspace/files/download?path=${encodeURIComponent(path)}`,
+  workspaceFileInlineUrl: (path) =>
+    `/api/workspace/files/download?path=${encodeURIComponent(path)}&inline=true`,
   containerStatus: () => api.get('/api/container/status', { timeoutMs: 30000 }),
   containerStorage: () => api.get('/api/container/storage', { timeoutMs: 30000 }),
   containerStorageSetup: (payload = {}) =>
@@ -293,7 +311,10 @@ export const endpoints = {
     api.del(`/api/providers/${encodeURIComponent(id)}?drop_key=${dropKey ? 'true' : 'false'}`),
   testProvider: (id) => api.post(`/api/providers/${encodeURIComponent(id)}/test`),
   testProviderConfig: (payload) => api.post('/api/providers/test', payload),
-  fetchProviderModels: (payload) => api.post('/api/providers/fetch-models', payload),
+  fetchProviderModels: (payload) =>
+    api.post('/api/providers/fetch-models', payload, { timeoutMs: 30000 }),
+  fetchProviderModelsById: (id) =>
+    api.post(`/api/providers/${encodeURIComponent(id)}/fetch-models`, {}, { timeoutMs: 30000 }),
 
   accessLists: () => api.get('/api/settings/lists'),
   saveAccessLists: (payload) => api.put('/api/settings/lists', payload),

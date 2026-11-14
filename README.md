@@ -1,9 +1,9 @@
 # KarenBot-WebUI
 
-KarenBot 的**浏览器前端**模块。仓库已公开，当前版本 **v0.1.1-alpha**。
+KarenBot 的**浏览器前端**模块。仓库已公开，当前版本 **v0.1.1-alpha.1**。
 
 > 这是模块源码仓库，不是独立应用。运行前需要 KarenBot 宿主和兼容的
-> `KarenBot-backend`（v0.1.1-alpha）。
+> `KarenBot-backend`（v0.1.1-alpha.1）。
 
 ## 这是什么
 
@@ -13,6 +13,9 @@ KarenBot 的**浏览器前端**模块。仓库已公开，当前版本 **v0.1.1-
 - `webui/static/`：HTML、CSS、原生 ES Module JavaScript
 - `webui/theme.py`：前端色板常量
 - `webui/__init__.py`：前端版本
+- `webui/plugin.json` + `webui/plugin.py`：前端插件清单与统一入口
+
+更新页已把后端更新与 WebUI 前端更新拆成两个独立区块。
 
 后端控制面位于独立的 `backend/` 包，通过 `backend.app.create_control_app()` 提供全部
 API、鉴权、Runtime 生命周期和事件流。这样 WebUI 与原生 GUI 共用同一份后端能力。
@@ -21,10 +24,10 @@ API、鉴权、Runtime 生命周期和事件流。这样 WebUI 与原生 GUI 共
 
 | 项目 | 版本 |
 |---|---|
-| 本模块 release | `v0.1.1-alpha`（预发布） |
-| 配套后端 | `KarenBot-backend` `v0.1.1-alpha` |
+| 本模块 release | `v0.1.1-alpha.1`（预发布） |
+| 配套后端 | `KarenBot-backend` `v0.1.1-alpha.1` |
 | KarenBot 宿主 | `1.0.1-alpha.1` 拆分版本及后续兼容版本 |
-| 配套 GUI | `KarenBot-GUI` `v0.1.1-alpha` |
+| 配套 GUI | `KarenBot-GUI` `v0.1.1-alpha.1` |
 
 ## 目录
 
@@ -88,7 +91,7 @@ python webui_server.py --no-auth # 仅限本机/可信网络
 ## 版本与发布
 
 - 版本标签格式：`vMAJOR.MINOR.PATCH[-dev]`
-- 当前 `v0.1.1-alpha` 为预发布开发版，页面与 API 可能调整。
+- 当前 `v0.1.1-alpha.1` 为预发布开发版，页面与 API 可能调整。
 - Release 自动提供源码归档，并附带模块源码 zip。
 - 与后端模块的兼容关系见上表；后端不兼容升级时前端需要对应升级。
 

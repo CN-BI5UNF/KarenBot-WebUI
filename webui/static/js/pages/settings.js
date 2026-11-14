@@ -1098,9 +1098,15 @@ export async function render(container, ctx) {
       return;
     }
     const notification = status.notification || {};
+    const moduleMode = status.mode === 'module';
+    const frontendKey = status.frontend || 'gui';
+    const frontendLabel = status.frontend_label || '前端';
     const statusLine = h('div', { class: 'field-help' });
     const resultHost = h('div', {});
-    let releaseList = null;
+    const releaseLists = [];
+    const refreshLists = () => {
+      for (const list of releaseLists) list.refresh();
+    };
     const checkBtn = h('button', { class: 'btn btn-primary' }, '检查更新');
     const restartBackendBtn = h('button', {
       class: 'btn', dataset: { backendRestart: '1' },
@@ -1132,7 +1138,7 @@ export async function render(container, ctx) {
         } else {
           statusLine.textContent = '当前没有可应用的新版本。';
         }
-        if (releaseList) releaseList.refresh();
+        refreshLists();
       } catch (e) {
         statusLine.textContent = `检查失败：${e.message}`;
         resultHost.replaceChildren();
@@ -1140,7 +1146,6 @@ export async function render(container, ctx) {
         checkBtn.disabled = false;
       }
     });
-    const moduleMode = status.mode === 'module';
     const short = (value) => (value ? String(value).slice(0, 10) : '—');
     const lastCheck = notification.last_check_at
       ? formatDateTime(notification.last_check_at) : '尚未检查';
@@ -1166,25 +1171,33 @@ export async function render(container, ctx) {
         : '干净')),
       h('tr', {}, h('td', {}, '数据目录'), h('td', { class: 'mono' }, status.data_dir)),
     ];
-    if (moduleMode) {
-      for (const component of Object.values(status.components || {})) {
-        const installed = component.installed || {};
-        rows.push(h('tr', {}, h('td', {}, component.label || component.component),
-          h('td', { class: 'mono' },
-            `${installed.version || installed.tag || '未记录'} · ${component.repo || ''}`)));
-      }
-    }
     if (notification.last_error) {
       rows.push(h('tr', {}, h('td', {}, '上次检查错误'),
         h('td', { class: 'field-help' }, notification.last_error)));
     }
-    nodes.push(card('版本与更新',
+    const notifyInput = h('input', {
+      type: 'checkbox',
+      checked: !notification.suppressed,
+    });
+    notifyInput.addEventListener('change', async () => {
+      notifyInput.disabled = true;
+      try {
+        await endpoints.updatePreferences({ suppress_badge: !notifyInput.checked });
+        ctx.toast(notifyInput.checked ? '已开启更新提醒' : '已关闭更新提醒', 'ok');
+      } catch (e) {
+        notifyInput.checked = !notifyInput.checked;
+        ctx.toast(e.message, 'error');
+      } finally {
+        notifyInput.disabled = false;
+      }
+    });
+    nodes.push(card('更新概览',
       `版本来自 ${status.repo} 的 GitHub Releases/tag；只更新源码，不覆盖用户数据。`,
       table(['项目', '值'], rows),
+      h('label', { class: 'switch' }, notifyInput, h('span', {}, '接收更新提醒')),
       h('p', { class: 'field-help' },
         moduleMode
-          ? '只替换 backend 与当前前端模块；Latest 会自动提醒，Pre-release 不会自动提醒，'
-            + '但可在下方手动选择，应用前会强制提示极不稳定。'
+          ? '后端和当前前端是两个独立组件；下面分别列出各自的版本和 Release。'
           : '应用版本会备份当前提交并重启服务；依赖文件变化时会自动安装，失败则回滚源码。'
             + '镜像站会提供将执行的代码，请只使用可信 https 镜像。'),
       h('p', { class: 'field-help' },
@@ -1199,31 +1212,89 @@ export async function render(container, ctx) {
     ));
 
     if (!moduleMode) {
-      nodes.push(renderMirrorCard(status, ctx, () => {
-        if (releaseList) releaseList.refresh();
-      }));
+      nodes.push(renderMirrorCard(status, ctx, refreshLists));
     }
 
-    const releaseHost = h('div', {});
-    const refreshBtn = h('button', { class: 'btn btn-sm' }, '刷新版本列表');
-    nodes.push(card('版本列表',
-      moduleMode
-        ? '按组件列出 GitHub Releases；Pre-release 只允许手动选择，并会显示不稳定警告。'
-        : '每个版本都可以展开/收起更新日志；更新与回退都会先备份当前提交。',
-      h('div', { class: 'row' },
-        h('span', { class: 'field-help' }, '勾选“接收更新提醒”可控制总览页绿色标志。'),
-        h('div', { class: 'spacer' }),
-        refreshBtn),
-      releaseHost));
-    // 版本列表需要联网；不要 await，否则整个“更新”分页会被 git fetch 卡住。
-    // renderReleaseList 会先同步写入“正在读取版本列表…”，页面可以立即显示。
-    refreshBtn.addEventListener('click', () => {
-      if (releaseList) releaseList.refresh();
-    });
-    renderReleaseList(releaseHost, ctx, { showNotifyToggle: true })
-      .then((handle) => { releaseList = handle; })
-      .catch((e) => fill(releaseHost, empty(`读取版本列表失败：${e.message}`)));
+    function componentCard(title, component, key) {
+      const releaseHost = h('div', {});
+      let handle = null;
+      const refreshBtn = h('button', { class: 'btn btn-sm' }, '刷新版本列表');
+      refreshBtn.addEventListener('click', () => {
+        if (handle) handle.refresh();
+      });
+      const description = key === 'backend'
+        ? '后端控制面独立更新；与当前 GUI/WebUI 前端分开维护。'
+        : (key === 'webui'
+          ? 'WebUI 前端模块独立更新；更新后刷新页面即可。'
+          : 'GUI 前端模块独立更新；更新后需要完全退出并重新打开应用。');
+      const cardNode = card(title, description,
+        table(['项目', '值'], componentRows(component)),
+        h('div', { class: 'row' },
+          h('span', { class: 'field-help' }, '每个版本都可以展开/收起更新日志。'),
+          h('div', { class: 'spacer' }),
+          refreshBtn),
+        releaseHost);
+      renderReleaseList(releaseHost, ctx, {
+        component: key,
+        showSummary: false,
+      })
+        .then((list) => {
+          handle = list;
+          releaseLists.push(list);
+        })
+        .catch((e) => fill(releaseHost, empty(`读取版本列表失败：${e.message}`)));
+      return cardNode;
+    }
+
+    if (moduleMode) {
+      const components = status.components || {};
+      nodes.push(componentCard('后端更新', components.backend || {}, 'backend'));
+      nodes.push(componentCard(
+        `${frontendLabel} 更新`,
+        components[frontendKey] || {},
+        frontendKey,
+      ));
+    } else {
+      const releaseHost = h('div', {});
+      let handle = null;
+      const refreshBtn = h('button', { class: 'btn btn-sm' }, '刷新版本列表');
+      refreshBtn.addEventListener('click', () => {
+        if (handle) handle.refresh();
+      });
+      nodes.push(card('版本列表',
+        '每个版本都可以展开/收起更新日志；更新与回退都会先备份当前提交。',
+        h('div', { class: 'row' },
+          h('span', { class: 'field-help' }, '当前安装没有拆分模块，显示整仓版本。'),
+          h('div', { class: 'spacer' }),
+          refreshBtn),
+        releaseHost));
+      renderReleaseList(releaseHost, ctx, { showNotifyToggle: false })
+        .then((list) => {
+          handle = list;
+          releaseLists.push(list);
+        })
+        .catch((e) => fill(releaseHost, empty(`读取版本列表失败：${e.message}`)));
+    }
     fill(host, ...nodes);
+  }
+
+  function componentRows(component) {
+    const installed = component.installed || {};
+    const stable = component.latest_stable || {};
+    const prerelease = component.latest_prerelease || {};
+    const version = (item) => item.version || item.release_tag || item.tag || '—';
+    let state = '已是最新';
+    if (component.update_available) state = '有稳定版可更新';
+    else if (component.prerelease_available) state = '有 Pre-release 可手动选择';
+    return [
+      h('tr', {}, h('td', {}, '已安装'), h('td', { class: 'mono' },
+        installed.version || installed.tag || '未记录')),
+      h('tr', {}, h('td', {}, '最新稳定版'), h('td', { class: 'mono' }, version(stable))),
+      h('tr', {}, h('td', {}, '最新 Pre-release'), h('td', { class: 'mono' }, version(prerelease))),
+      h('tr', {}, h('td', {}, '状态'), h('td', {}, state)),
+      h('tr', {}, h('td', {}, '仓库'), h('td', { class: 'mono' },
+        component.repo || '—')),
+    ];
   }
 
   function renderMirrorCard(status, ctx, onSaved) {
@@ -1610,24 +1681,29 @@ export async function render(container, ctx) {
     const commits = (checked.commits || []).map((line) => h('li', {}, line));
     const warnings = (checked.warnings || []).map((line) =>
       h('p', { class: 'field-help' }, line));
-    const componentRows = (checked.updates || []).map((item) =>
-      h('p', { class: 'field-help' },
-        `${item.component_label || item.component}：`
-        + `${item.release_tag || item.tag}`
-        + (item.prerelease ? '（Pre-release，极不稳定）' : '')));
-    const errorRows = Object.entries(checked.errors || {}).map(([key, value]) =>
-      h('p', { class: 'field-help danger-text' }, `${key}: ${value}`));
     const deps = checked.dependency_changes?.length
       ? h('p', { class: 'field-help' },
         `依赖文件变化（${checked.auto_install_dependencies
           ? '应用更新后自动安装，失败会回滚源码'
           : '需手动安装，禁止自动应用'}）：${checked.dependency_changes.join(', ')}`)
       : null;
+    const updates = (checked.updates || []).filter((item) => item && item.component);
+    const grouped = new Map();
+    for (const item of updates) {
+      if (!grouped.has(item.component)) grouped.set(item.component, []);
+      grouped.get(item.component).push(item);
+    }
+    const groups = [...grouped.entries()].map(([component, items]) =>
+      h('div', { class: 'release-component-result' },
+        h('p', { class: 'field-help' },
+          component === 'backend' ? '后端更新' : '前端更新'),
+        ...items.map((item) => h('p', {},
+          `${item.component_label || component}：${item.release_tag || item.tag || '—'}`
+          + (item.prerelease ? '（Pre-release，极不稳定）' : '')))));
     return h('div', {},
       h('p', {}, `目标：${checked.target_name || checked.target_label || '—'}`
-        + (checked.target_commit_short ? `（${checked.target_commit_short}）` : '')),
-      ...componentRows,
-      ...errorRows,
+        + `（${checked.target_commit_short || '—'}）`),
+      ...groups,
       commits.length ? h('div', {}, h('div', {}, '目标提交：'), h('ul', {}, ...commits)) : null,
       deps,
       ...warnings,

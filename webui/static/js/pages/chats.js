@@ -9,12 +9,14 @@
 // 过滤开关（聊天/系统/工具/思考 + 只看图片文件）与默认展开开关的语义、默认值
 // 都照搬原 GUI 的 chats_page.py:556-605。
 
-import { h, fill, empty, formatTime, debounce } from '../dom.js';
+import { h, fill, empty, formatTime, debounce, modal } from '../dom.js';
 import { endpoints } from '../api.js';
+import { icon } from '../icons.js';
 import { ensureEmojiNames, renderMessageText } from '../emoji_inline.js';
 
 const DEFAULT_LIMIT = 300;
-const LIMIT_STEP = 300;
+// “显示全部”最多自动翻多少页，避免一次点击把几万条记录全拉进浏览器。
+const MAX_LOAD_ALL_PAGES = 20;
 
 // 显示项类型 → 气泡样式
 const KIND_CLASS = {
@@ -27,6 +29,147 @@ const KIND_CLASS = {
   tool_call: 'tool',
   tool_result: 'tool',
 };
+
+
+const ATTACHMENT_TEXT_RE = /\[[^\[\]\n]{0,240}?workspace=(?:incoming|workspace|outgoing)[/\\][^\s\]]+[^\]]*\]/gi;
+
+function formatBytes(value) {
+  const size = Number(value);
+  if (!Number.isFinite(size) || size < 0) return '';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  return `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
+function attachmentName(att) {
+  return String(att.name || att.path || '文件');
+}
+
+function attachmentDownloadUrl(att) {
+  return endpoints.workspaceFileDownloadUrl(att.path);
+}
+
+function attachmentInlineUrl(att) {
+  return endpoints.workspaceFileInlineUrl(att.path);
+}
+
+function attachmentCanOpenInBrowser(att) {
+  const mime = String(att.mime || '').toLowerCase();
+  return att.kind === 'image'
+    || att.kind === 'video'
+    || att.kind === 'audio'
+    || mime === 'application/pdf'
+    || mime.startsWith('text/');
+}
+
+function openImagePreview(att) {
+  const name = attachmentName(att);
+  const dialog = modal({
+    title: name,
+    subtitle: att.size ? formatBytes(att.size) : '图片预览',
+    body: h('img', {
+      class: 'chat-lightbox-image',
+      src: endpoints.workspaceFileRawUrl(att.path),
+      alt: name,
+    }),
+    footer: [
+      h('button', { class: 'btn', onclick: () => dialog.close() }, '关闭'),
+      h('a', {
+        class: 'btn',
+        href: attachmentDownloadUrl(att),
+        download: name,
+      }, icon('download', { size: 16 }), '下载'),
+      h('a', {
+        class: 'btn btn-primary',
+        href: attachmentInlineUrl(att),
+        target: '_blank',
+        rel: 'noopener',
+      }, '在浏览器打开'),
+    ],
+    wide: true,
+  });
+  document.body.append(dialog.el);
+}
+
+function attachmentsNode(item) {
+  const attachments = Array.isArray(item.attachments) ? item.attachments : [];
+  if (!attachments.length) return null;
+  return h('div', { class: 'chat-attachments' },
+    ...attachments.map((att) => {
+      const name = attachmentName(att);
+      if (att.kind === 'image') {
+        return h('figure', { class: 'chat-attachment chat-image-attachment' },
+          h('button', {
+            class: 'chat-image-button',
+            title: `查看 ${name}`,
+            onclick: () => openImagePreview(att),
+          },
+            h('img', {
+              class: 'chat-attachment-image',
+              src: endpoints.workspaceFileRawUrl(att.path),
+              alt: name,
+              loading: 'lazy',
+            }),
+          ),
+          h('figcaption', { class: 'chat-attachment-caption' }, name),
+        );
+      }
+      if (att.kind === 'video' || att.kind === 'audio') {
+        return h('div', { class: 'chat-attachment chat-av-attachment' },
+          att.kind === 'video'
+            ? h('video', {
+              class: 'chat-attachment-video',
+              controls: true,
+              preload: 'metadata',
+              src: attachmentInlineUrl(att),
+            })
+            : h('audio', {
+              class: 'chat-attachment-audio',
+              controls: true,
+              preload: 'metadata',
+              src: attachmentInlineUrl(att),
+            }),
+          h('div', { class: 'chat-attachment-bar' },
+            h('span', { class: 'chat-attachment-name', title: name }, name),
+            att.size ? h('span', { class: 'field-help' }, formatBytes(att.size)) : null,
+            h('div', { class: 'spacer' }),
+            h('a', {
+              class: 'btn btn-sm',
+              href: attachmentDownloadUrl(att),
+              download: name,
+            }, '下载'),
+          ),
+        );
+      }
+      return h('div', { class: 'chat-attachment chat-file-attachment' },
+        icon('file', { size: 18 }),
+        h('span', { class: 'chat-attachment-name', title: name }, name),
+        att.size ? h('span', { class: 'field-help' }, formatBytes(att.size)) : null,
+        h('div', { class: 'spacer' }),
+        attachmentCanOpenInBrowser(att)
+          ? h('a', {
+            class: 'btn btn-sm',
+            href: attachmentInlineUrl(att),
+            target: '_blank',
+            rel: 'noopener',
+          }, '浏览器打开')
+          : null,
+        h('a', {
+          class: 'btn btn-sm',
+          href: attachmentDownloadUrl(att),
+          download: name,
+        }, '下载'),
+      );
+    }),
+  );
+}
+
+function displayItemText(item) {
+  const text = String(item.text || '');
+  if (!Array.isArray(item.attachments) || !item.attachments.length) return text;
+  return text.replace(ATTACHMENT_TEXT_RE, '').trim();
+}
 
 const KIND_LABEL = {
   reasoning: '思考',
@@ -42,6 +185,11 @@ export async function render(container, ctx) {
     conversations: [],
     activeId: '',
     items: [],
+    latestItems: [],
+    olderItems: [],
+    olderCursor: null,
+    olderHasMore: false,
+    olderLoading: false,
     total: 0,
     filteredTotal: 0,
     truncated: false,
@@ -85,7 +233,7 @@ export async function render(container, ctx) {
     placeholder: '在记录里搜索…',
     oninput: debounce((event) => {
       state.searchText = event.target.value.trim();
-      state.limit = DEFAULT_LIMIT;
+      resetPaging();
       loadItems();
     }, 250),
   });
@@ -96,7 +244,7 @@ export async function render(container, ctx) {
       checked: state[key],
       onchange: (event) => {
         state[key] = event.target.checked;
-        state.limit = DEFAULT_LIMIT;
+        resetPaging();
         loadItems();
       },
     });
@@ -250,19 +398,213 @@ export async function render(container, ctx) {
     return q.toString();
   }
 
-  async function loadItems() {
+  function resetPaging() {
+    state.limit = DEFAULT_LIMIT;
+    state.items = [];
+    state.latestItems = [];
+    state.olderItems = [];
+    state.olderCursor = null;
+    state.olderHasMore = false;
+    state.olderLoading = false;
+  }
+
+  function pageParams(beforeId, cursorOverride = undefined) {
+    const params = {
+      conversation_id: state.activeId,
+      limit: DEFAULT_LIMIT,
+      show_chat: state.showChat ? 'true' : 'false',
+      show_system: state.showSystem ? 'true' : 'false',
+      show_tools: state.showTools ? 'true' : 'false',
+      show_reasoning: state.showReasoning ? 'true' : 'false',
+      media_only: state.mediaOnly ? 'true' : 'false',
+    };
+    const cursor = cursorOverride === undefined ? state.olderCursor : cursorOverride;
+    if (cursor) params.cursor = cursor;
+    else if (beforeId) params.before_id = beforeId;
+    if (state.searchText) params.q = state.searchText;
+    return params;
+  }
+
+  function bridgeParams(beforeId) {
+    const params = pageParams(beforeId, '');
+    delete params.cursor;
+    return params;
+  }
+
+  function dedupeItems(items) {
+    const seen = new Set();
+    return items.filter((item) => {
+      if (!item || !item.id || seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    });
+  }
+
+  /** 新页比已加载旧页更早；有重叠时以整段重叠区为锚点拼接，避免缺口或倒序。 */
+  function mergeOlder(fresh, existing) {
+    if (!fresh.length) return existing;
+    if (!existing.length) return dedupeItems(fresh);
+    const existingIds = new Set(existing.map((item) => item.id));
+    let firstOverlap = -1;
+    let lastOverlap = -1;
+    for (let i = 0; i < fresh.length; i += 1) {
+      if (!existingIds.has(fresh[i].id)) continue;
+      if (firstOverlap < 0) firstOverlap = i;
+      lastOverlap = i;
+    }
+    if (firstOverlap >= 0) {
+      return dedupeItems([
+        ...fresh.slice(0, firstOverlap),
+        ...existing,
+        ...fresh.slice(lastOverlap + 1),
+      ]);
+    }
+    return dedupeItems([...fresh, ...existing]);
+  }
+
+  function mergeDisplayItems() {
+    const latestIds = new Set(state.latestItems.map((item) => item.id));
+    const olderOnly = state.olderItems.filter((item) => !latestIds.has(item.id));
+    return [...olderOnly, ...state.latestItems];
+  }
+
+  function captureScroll() {
+    return { top: msgList.scrollTop, height: msgList.scrollHeight };
+  }
+
+  function restorePrepend(snapshot) {
+    const delta = msgList.scrollHeight - snapshot.height;
+    if (delta) msgList.scrollTop = snapshot.top + delta;
+  }
+
+  function nearBottom() {
+    return msgList.scrollHeight - msgList.scrollTop - msgList.clientHeight < 40;
+  }
+
+  async function loadItems({ stickBottom = false } = {}) {
     if (!state.activeId) return;
     const id = state.activeId;
+    const snapshot = captureScroll();
+    const previousFirst = state.latestItems[0]?.id || '';
     try {
       const data = await endpoints.display(queryString());
       if (state.disposed || state.activeId !== id) return;
-      state.items = data.items || [];
+      const newLatest = data.items || [];
+      const shifted = Boolean(
+        previousFirst && newLatest[0]?.id && newLatest[0].id !== previousFirst,
+      );
+      state.latestItems = newLatest;
       state.total = data.total || 0;
       state.filteredTotal = data.filtered_total || 0;
       state.truncated = !!data.truncated;
+      if (!state.olderItems.length) state.olderHasMore = state.truncated;
+
+      // 最新窗口向前滑动后，旧窗口尾部与已加载旧页之间可能留下空隙；
+      // 用分页接口把紧邻最新窗口的一页补回来。
+      if (shifted && state.olderItems.length && newLatest[0]?.id) {
+        try {
+          const bridge = await endpoints.chatDisplayPage(
+            bridgeParams(newLatest[0].id),
+          );
+          if (state.disposed || state.activeId !== id) return;
+          state.olderItems = mergeOlder(bridge.items || [], state.olderItems);
+        } catch (e) {
+          if (e.status === 409) {
+            state.olderItems = [];
+            state.olderCursor = null;
+            state.olderHasMore = state.truncated;
+          } else {
+            console.warn('补齐对话分页空隙失败', e);
+          }
+        }
+      }
+
+      state.items = mergeDisplayItems();
       renderItems();
+      if (stickBottom) {
+        msgList.scrollTop = msgList.scrollHeight;
+      } else if (state.olderItems.length) {
+        restorePrepend(snapshot);
+      }
     } catch (e) {
       fill(msgList, empty('记录没能读出来', { subtitle: e.message, iconName: 'chats' }));
+    }
+  }
+
+  async function loadOlder() {
+    if (!state.activeId || state.olderLoading) return;
+    const id = state.activeId;
+    const anchor = state.items[0]?.id;
+    if (!state.olderCursor && !anchor) return;
+    state.olderLoading = true;
+    const snapshot = captureScroll();
+    try {
+      const data = await endpoints.chatDisplayPage(pageParams(anchor));
+      if (state.disposed || state.activeId !== id) return;
+      state.olderItems = mergeOlder(data.items || [], state.olderItems);
+      state.olderCursor = data.next_cursor || null;
+      state.olderHasMore = !!data.has_more;
+      state.items = mergeDisplayItems();
+      state.olderLoading = false;
+      renderItems();
+      restorePrepend(snapshot);
+    } catch (e) {
+      state.olderLoading = false;
+      if (e.status === 409) {
+        state.olderItems = [];
+        state.olderCursor = null;
+        state.olderHasMore = false;
+        state.items = mergeDisplayItems();
+        renderItems();
+        ctx.toast('记录位置已变化，已重新从最新记录开始', 'warn');
+        await loadItems();
+      } else {
+        ctx.toast(e.message, 'error');
+      }
+    }
+  }
+
+  async function loadAllOlder() {
+    if (!state.activeId || state.olderLoading) return;
+    const id = state.activeId;
+    let cursor = state.olderCursor;
+    let beforeId = state.items[0]?.id;
+    if (!cursor && !beforeId) return;
+    state.olderLoading = true;
+    const snapshot = captureScroll();
+    let pages = 0;
+    try {
+      while (pages < MAX_LOAD_ALL_PAGES) {
+        const data = await endpoints.chatDisplayPage(pageParams(beforeId, cursor));
+        if (state.disposed || state.activeId !== id) return;
+        state.olderItems = mergeOlder(data.items || [], state.olderItems);
+        cursor = data.next_cursor || null;
+        state.olderHasMore = !!data.has_more;
+        beforeId = null;
+        pages += 1;
+        if (!state.olderHasMore) break;
+      }
+      state.olderCursor = cursor;
+      state.olderLoading = false;
+      state.items = mergeDisplayItems();
+      renderItems();
+      restorePrepend(snapshot);
+      if (state.olderHasMore) {
+        ctx.toast(`一次最多加载 ${MAX_LOAD_ALL_PAGES} 页，可继续点“加载更早”`, 'warn');
+      }
+    } catch (e) {
+      state.olderLoading = false;
+      if (e.status === 409) {
+        state.olderItems = [];
+        state.olderCursor = null;
+        state.olderHasMore = false;
+        state.items = mergeDisplayItems();
+        renderItems();
+        ctx.toast('记录位置已变化，已重新从最新记录开始', 'warn');
+        await loadItems();
+      } else {
+        ctx.toast(e.message, 'error');
+      }
     }
   }
 
@@ -306,12 +648,16 @@ export async function render(container, ctx) {
       item.timestamp ? h('span', { class: 'field-help' }, ` · ${formatTime(item.timestamp)}`) : null,
       h('span', { class: 'item-summary' }, item.summary || ''),
     );
+    const text = displayItemText(item);
     return h('div', {
       class: `msg ${extraClass} ${open ? 'open' : 'collapsed'}`,
       dataset: { kind: item.kind, severity: item.severity },
     },
       head,
-      open ? h('div', { class: 'msg-body' }, renderMessageText(item.text)) : null,
+      open ? h('div', { class: 'msg-body' },
+        text ? renderMessageText(text) : null,
+        attachmentsNode(item),
+      ) : null,
     );
   }
 
@@ -320,13 +666,18 @@ export async function render(container, ctx) {
       case 'inbound_message':
       case 'outbound_message': {
         const who = item.speaker_label || (item.kind === 'inbound_message' ? '用户' : '人格');
+        const text = displayItemText(item);
+        const attachments = attachmentsNode(item);
         return h('div', { class: `msg ${KIND_CLASS[item.kind]}`, dataset: { kind: item.kind } },
           h('div', { class: 'msg-head' },
             h('span', { class: 'msg-role' }, who),
             item.timestamp ? ` · ${formatTime(item.timestamp)}` : '',
             item.summary ? ` · ${item.summary}` : '',
           ),
-          h('div', { class: 'msg-body' }, renderMessageText(item.text || '（空）')),
+          h('div', { class: 'msg-body' },
+            text ? renderMessageText(text) : (attachments ? null : '（空）'),
+            attachments,
+          ),
         );
       }
       case 'reasoning':
@@ -365,7 +716,7 @@ export async function render(container, ctx) {
     fill(msgHead,
       h('strong', {}, conv ? conv.label : state.activeId),
       h('span', { class: 'field-help' },
-        `${state.filteredTotal} / ${state.total} 条`),
+        `${state.items.length} 项 / ${state.total} 条记录`),
     );
 
     if (!state.items.length) {
@@ -385,24 +736,26 @@ export async function render(container, ctx) {
 
     fill(msgList, ...state.items.map(itemNode));
 
-    // 分页条：照搬原 GUI 的「加载更早（N）/ 显示全部 / 已显示全部」
-    const hidden = state.filteredTotal - state.items.length;
-    if (hidden > 0) {
+    // 更早记录由后端快照分页提供，不再靠增大 limit 重新拉整段。
+    const canLoadOlder = state.olderHasMore
+      || (state.olderItems.length === 0 && state.truncated);
+    if (canLoadOlder) {
       fill(pagerBar,
-        h('span', { class: 'field-help' },
-          `还有 ${hidden} 条更早的记录未显示`),
+        h('span', { class: 'field-help' }, '还有更早的记录未显示'),
         h('div', { class: 'spacer' }),
         h('button', {
           class: 'btn btn-sm',
-          onclick: () => { state.limit += LIMIT_STEP; loadItems(); },
-        }, `加载更早（${Math.min(hidden, LIMIT_STEP)}）`),
+          disabled: state.olderLoading,
+          onclick: () => loadOlder(),
+        }, state.olderLoading ? '加载中…' : '加载更早'),
         h('button', {
           class: 'btn btn-sm',
-          onclick: () => { state.limit = 0; loadItems(); },
+          disabled: state.olderLoading,
+          onclick: () => loadAllOlder(),
         }, '显示全部'),
       );
-    } else if (state.truncated) {
-      fill(pagerBar, h('span', { class: 'field-help' }, '已显示全部'));
+    } else if (state.olderItems.length) {
+      fill(pagerBar, h('span', { class: 'field-help' }, '已显示全部记录'));
     } else {
       fill(pagerBar);
     }
@@ -411,8 +764,7 @@ export async function render(container, ctx) {
   async function selectConversation(id) {
     if (id === state.activeId) return;
     state.activeId = id;
-    state.items = [];
-    state.limit = DEFAULT_LIMIT;
+    resetPaging();
     state.expanded.clear();
     state.collapsed.clear();
     renderConversations();
@@ -431,8 +783,9 @@ export async function render(container, ctx) {
       await loadConversations();
       return;
     }
-    await loadItems();
-    msgList.scrollTop = msgList.scrollHeight;
+    // 正在往上翻旧记录时不要强行跳到新消息；只更新数据并保持视口。
+    const stick = nearBottom();
+    await loadItems({ stickBottom: stick });
     await loadConversations();
   });
 

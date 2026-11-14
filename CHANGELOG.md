@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.1-alpha.1 — 2026-11-15
+
+- 与 `KarenBot-backend`、`KarenBot-GUI` 的 v0.1.1-alpha.1 配套。
+- WebUI 注册为前端插件：`webui/plugin.json` + `webui/plugin.py`。
+- 更新页把“后端更新”和“WebUI 前端更新”拆成独立区块；两个版本列表各自过滤、刷新和应用。
+- 聊天页支持 Display 分页、图片附件预览/灯箱、文件下载到访问机/浏览器打开。
+- 同步 API、设置页、总览、人格、知识页等最新修复与韧性改动。
+
 ## v0.1.1-alpha — 2026-11-13
 
 首个公开发布版本。

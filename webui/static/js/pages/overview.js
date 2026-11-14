@@ -272,8 +272,16 @@ export async function render(container, ctx) {
     }
   }
 
+  let refreshInFlight = false;
+  let refreshQueued = false;
+
   async function refresh() {
     if (disposed) return;
+    if (refreshInFlight) {
+      refreshQueued = true;
+      return;
+    }
+    refreshInFlight = true;
     try {
       const data = await endpoints.overview(range);
       if (disposed) return;
@@ -288,6 +296,12 @@ export async function render(container, ctx) {
         h('div', { class: 'stat-value small' }, h('span', { class: 'badge bad' }, '不可用')),
         h('div', { class: 'field-help' }, e.message),
       );
+    } finally {
+      refreshInFlight = false;
+      if (refreshQueued && !disposed) {
+        refreshQueued = false;
+        refresh();
+      }
     }
   }
 

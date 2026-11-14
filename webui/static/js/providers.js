@@ -647,7 +647,16 @@ async function openProviderDialog(
     fetchBtn.disabled = true;
     setStatus('正在获取…');
     try {
-      const result = await endpoints.fetchProviderModels(payload({ forProbe: true }));
+      // 编辑已保存提供商且没重新输入密钥时，优先让后端用密钥库里的密钥直接拉取；
+      // 但连接参数被改过就必须走未保存配置，否则会拿到旧地址的结果。
+      const reuseSaved = isEdit && !state.provider.api_key && existing?.has_key
+        && (state.provider.base_url || '') === (existing.base_url || '')
+        && (state.provider.protocol || 'openai_compat') === (existing.protocol || 'openai_compat')
+        && (state.provider.preset || '') === (existing.preset || '')
+        && (state.provider.model_vendor || '') === (existing.model_vendor || '');
+      const result = reuseSaved
+        ? await endpoints.fetchProviderModelsById(existing.id)
+        : await endpoints.fetchProviderModels(payload({ forProbe: true }));
       const models = result.models || [];
       fields.modelInput.setAttribute('list', 'provider-model-options');
       const list = document.getElementById('provider-model-options');

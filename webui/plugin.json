@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "webui",
+  "name": "KarenBot WebUI",
+  "kind": "frontend",
+  "api_version": 1,
+  "entry": "webui.plugin:WebUIFrontendPlugin",
+  "description": "浏览器控制台（共享 backend 控制面）",
+  "capabilities": ["browser", "static"]
+}

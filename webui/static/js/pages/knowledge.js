@@ -42,6 +42,7 @@ function splitList(value) {
 export async function render(container, ctx) {
   let data = null;
   let busy = false;
+  let dedupeBusy = false;
 
   const statusLine = h('p', { class: 'field-help' });
   const statsHost = h('div', { class: 'row row-wrap' });
@@ -73,6 +74,7 @@ export async function render(container, ctx) {
   const researchBtn = h('button', { class: 'btn btn-primary' }, '联网考究');
   const trendsBtn = h('button', { class: 'btn' }, '获取当前热梗');
   const addBtn = h('button', { class: 'btn' }, '手动添加');
+  const dedupeBtn = h('button', { class: 'btn' }, '检查重复');
 
   async function load() {
     try {
@@ -343,7 +345,68 @@ export async function render(container, ctx) {
     }
   }
 
+  async function dedupe() {
+    if (dedupeBusy) return;
+    dedupeBusy = true;
+    dedupeBtn.disabled = true;
+    let modalOpen = false;
+    try {
+      const preview = await endpoints.knowledgeDedupe({ dry_run: true });
+      const removed = preview.removed || [];
+      if (!removed.length) {
+        ctx.toast('没有发现可合并的重复条目', 'ok');
+        return;
+      }
+      const rows = removed.slice(0, 12).map((item) => h('tr', {},
+        h('td', {}, item.title || item.id || '—'),
+        h('td', {}, item.kept_title || item.kept_id || '—'),
+      ));
+      const confirmBtn = h('button', { class: 'btn btn-primary' }, '合并并备份');
+      const dialog = modal({
+        title: `发现 ${removed.length} 条可合并重复项`,
+        subtitle: `合并前 ${preview.before} 条，合并后 ${preview.after} 条；写盘前会自动备份知识库。`,
+        body: h('div', {},
+          table(['将删除', '保留'], rows),
+          removed.length > 12
+            ? h('p', { class: 'field-help' }, `仅显示前 12 条，共 ${removed.length} 条。`)
+            : null,
+        ),
+        footer: [
+          h('button', { class: 'btn', onclick: () => dialog.close() }, '取消'),
+          confirmBtn,
+        ],
+        wide: true,
+        onClose: () => {
+          dedupeBusy = false;
+          dedupeBtn.disabled = false;
+        },
+      });
+      modalOpen = true;
+      confirmBtn.onclick = async () => {
+        confirmBtn.disabled = true;
+        try {
+          const result = await endpoints.knowledgeDedupe({ dry_run: false });
+          dialog.close();
+          ctx.toast(`已合并 ${result.removed_count || 0} 条重复项`, 'ok');
+          await load();
+        } catch (e) {
+          ctx.toast(e.message, 'error');
+          confirmBtn.disabled = false;
+        }
+      };
+      document.body.append(dialog.el);
+    } catch (e) {
+      ctx.toast(e.message, 'error');
+    } finally {
+      if (!modalOpen) {
+        dedupeBusy = false;
+        dedupeBtn.disabled = false;
+      }
+    }
+  }
+
   refreshBtn.onclick = () => load();
+  dedupeBtn.onclick = dedupe;
   researchBtn.onclick = research;
   trendsBtn.onclick = refreshTrends;
   addBtn.onclick = () => openEditor();
@@ -365,6 +428,7 @@ export async function render(container, ctx) {
           onclick: () => ctx.navigate('settings', { section: 'features' }),
         }, '考究设置'),
         addBtn,
+        dedupeBtn,
         refreshBtn,
       ),
     ),

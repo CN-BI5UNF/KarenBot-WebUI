@@ -162,7 +162,12 @@ function releaseCard(release, { busy, onApply }) {
 export async function renderReleaseList(
   host,
   ctx,
-  { showNotifyToggle = false, onApplied = null } = {},
+  {
+    showNotifyToggle = false,
+    onApplied = null,
+    component = '',
+    showSummary = true,
+  } = {},
 ) {
   let busy = false;
   let applied = false;
@@ -179,7 +184,7 @@ export async function renderReleaseList(
   }
 
   function renderSummary() {
-    if (!available) return;
+    if (!showSummary || !available) return;
     const checked = available.last_check_at
       ? formatDateTime(available.last_check_at) : '尚未检查';
     const next = available.next_check_at
@@ -229,16 +234,24 @@ export async function renderReleaseList(
 
   function renderList() {
     if (!listing) return;
-    const releases = listing.releases || [];
+    const releases = (listing.releases || []).filter(
+      (release) => !component || release.component === component,
+    );
     const errors = listing.errors || {};
+    const relevantErrors = component
+      ? Object.fromEntries(
+        Object.entries(errors).filter(([key]) => key === component),
+      )
+      : errors;
     const nodes = [];
-    if (Object.keys(errors).length) {
+    if (Object.keys(relevantErrors).length) {
       nodes.push(h('p', { class: 'field-help danger-text' },
         '部分仓库读取失败：'
-        + Object.entries(errors).map(([key, value]) => `${key}: ${value}`).join('；')));
+        + Object.entries(relevantErrors)
+          .map(([key, value]) => `${key}: ${value}`).join('；')));
     }
     if (!releases.length) {
-      nodes.push(empty('远端还没有 Release；可以先创建一个版本 tag。'));
+      nodes.push(empty('该组件在远端还没有 Release。'));
     } else {
       nodes.push(...releases.map((release) => releaseCard(release, {
         busy,
@@ -326,7 +339,7 @@ export async function renderReleaseList(
     fill(errorHost);
     try {
       const [snapshot, data] = await Promise.all([
-        endpoints.updateAvailable(),
+        showSummary ? endpoints.updateAvailable() : Promise.resolve(null),
         endpoints.updateReleases(force),
       ]);
       available = snapshot;
@@ -348,7 +361,8 @@ export async function renderReleaseList(
     }
   }
 
-  fill(host, summaryHost, errorHost, listHost, message);
+  if (showSummary) fill(host, summaryHost, errorHost, listHost, message);
+  else fill(host, errorHost, listHost, message);
   await load(false);
   return {
     refresh: () => load(true),

@@ -392,6 +392,12 @@ async function enterApp() {
         qs('#side-conn-text').textContent = '控制台连接断开，重连中…';
       }
     };
+    // 后端重启或会话过期时 WS 会以 4401 关闭；不要无限重连，直接回登录页。
+    // 同时丢弃这个已关闭的流，否则重新登录后 enterApp 会复用它而不再连接。
+    state.stream.onUnauthorized = () => {
+      if (state.stream) { state.stream.close(); state.stream = null; }
+      showLogin();
+    };
     // 外壳只关心 status；chat / log 由各页面通过 ctx.onEvent 自行订阅。
     state.stream.subscribe((event) => {
       if (event.type === 'status') applyStatus(event.data);

@@ -375,7 +375,7 @@ export async function render(container, ctx) {
               }, '设为当前'),
               h('a', {
                 class: 'btn btn-sm',
-                href: `/api/personas/${encodeURIComponent(p.name)}/export`,
+                href: endpoints.personaExportUrl(p.name),
                 download: `${p.name}.zip`,
               }, '导出'),
               h('button', {
