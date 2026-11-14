@@ -46,12 +46,41 @@ function attachmentName(att) {
   return String(att.name || att.path || '文件');
 }
 
+function attachmentRemoteUrl(att, inline = true) {
+  const params = new URLSearchParams({
+    url: String(att.remote_url || ''),
+    name: attachmentName(att),
+    kind: String(att.kind || 'file'),
+    inline: inline ? 'true' : 'false',
+  });
+  return `/api/chats/attachments/remote?${params.toString()}`;
+}
+
+function attachmentUsesRemote(att) {
+  return Boolean(att.remote_url) && (att.missing || !att.path);
+}
+
 function attachmentDownloadUrl(att) {
+  if (attachmentUsesRemote(att)) return attachmentRemoteUrl(att, false);
   return endpoints.workspaceFileDownloadUrl(att.path);
 }
 
 function attachmentInlineUrl(att) {
+  if (attachmentUsesRemote(att)) return attachmentRemoteUrl(att, true);
   return endpoints.workspaceFileInlineUrl(att.path);
+}
+
+function missingAttachmentNode(att, message = '') {
+  const name = attachmentName(att);
+  return h('div', {
+    class: 'chat-attachment chat-file-attachment chat-attachment-missing',
+    title: message || '原图/文件已被清理，无法预览',
+  },
+    icon('file', { size: 18 }),
+    h('span', { class: 'chat-attachment-name', title: name }, name),
+    h('span', { class: 'field-help' },
+      message || '原图/文件已被清理，无法预览'),
+  );
 }
 
 function attachmentCanOpenInBrowser(att) {
@@ -70,7 +99,9 @@ function openImagePreview(att) {
     subtitle: att.size ? formatBytes(att.size) : '图片预览',
     body: h('img', {
       class: 'chat-lightbox-image',
-      src: endpoints.workspaceFileRawUrl(att.path),
+      src: attachmentUsesRemote(att)
+        ? attachmentRemoteUrl(att, true)
+        : endpoints.workspaceFileRawUrl(att.path),
       alt: name,
     }),
     footer: [
@@ -99,37 +130,55 @@ function attachmentsNode(item) {
     ...attachments.map((att) => {
       const name = attachmentName(att);
       if (att.kind === 'image') {
-        return h('figure', { class: 'chat-attachment chat-image-attachment' },
+        if (att.missing && !att.remote_url) {
+          return missingAttachmentNode(att);
+        }
+        const image = h('img', {
+          class: 'chat-attachment-image',
+          src: attachmentUsesRemote(att)
+            ? attachmentRemoteUrl(att, true)
+            : endpoints.workspaceFileRawUrl(att.path),
+          alt: name,
+          loading: 'lazy',
+          referrerpolicy: 'no-referrer',
+        });
+        const figure = h('figure', { class: 'chat-attachment chat-image-attachment' },
           h('button', {
             class: 'chat-image-button',
             title: `查看 ${name}`,
             onclick: () => openImagePreview(att),
-          },
-            h('img', {
-              class: 'chat-attachment-image',
-              src: endpoints.workspaceFileRawUrl(att.path),
-              alt: name,
-              loading: 'lazy',
-            }),
-          ),
+          }, image),
           h('figcaption', { class: 'chat-attachment-caption' }, name),
         );
+        if (att.missing) {
+          image.addEventListener('error', () => {
+            figure.replaceChildren(missingAttachmentNode(
+              att,
+              '原图已清理，QQ 原链接也已失效',
+            ));
+          });
+        }
+        return figure;
       }
       if (att.kind === 'video' || att.kind === 'audio') {
-        return h('div', { class: 'chat-attachment chat-av-attachment' },
-          att.kind === 'video'
-            ? h('video', {
-              class: 'chat-attachment-video',
-              controls: true,
-              preload: 'metadata',
-              src: attachmentInlineUrl(att),
-            })
-            : h('audio', {
-              class: 'chat-attachment-audio',
-              controls: true,
-              preload: 'metadata',
-              src: attachmentInlineUrl(att),
-            }),
+        if (att.missing && !att.remote_url) {
+          return missingAttachmentNode(att);
+        }
+        const media = att.kind === 'video'
+          ? h('video', {
+            class: 'chat-attachment-video',
+            controls: true,
+            preload: 'metadata',
+            src: attachmentInlineUrl(att),
+          })
+          : h('audio', {
+            class: 'chat-attachment-audio',
+            controls: true,
+            preload: 'metadata',
+            src: attachmentInlineUrl(att),
+          });
+        const box = h('div', { class: 'chat-attachment chat-av-attachment' },
+          media,
           h('div', { class: 'chat-attachment-bar' },
             h('span', { class: 'chat-attachment-name', title: name }, name),
             att.size ? h('span', { class: 'field-help' }, formatBytes(att.size)) : null,
@@ -141,6 +190,18 @@ function attachmentsNode(item) {
             }, '下载'),
           ),
         );
+        if (att.missing) {
+          media.addEventListener('error', () => {
+            box.replaceChildren(missingAttachmentNode(
+              att,
+              '原文件已清理，QQ 原链接也已失效',
+            ));
+          });
+        }
+        return box;
+      }
+      if (att.missing && !att.remote_url) {
+        return missingAttachmentNode(att);
       }
       return h('div', { class: 'chat-attachment chat-file-attachment' },
         icon('file', { size: 18 }),

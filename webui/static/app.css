@@ -1033,6 +1033,15 @@ html[data-theme="dark"] .modal-backdrop { background: rgba(0, 0, 0, .6); }
   overflow-wrap: anywhere;
 }
 
+.chat-attachment-missing {
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+
+.chat-attachment-missing .field-help {
+  margin-left: auto;
+}
+
 .chat-attachment-video {
   display: block;
   width: min(560px, 100%);
