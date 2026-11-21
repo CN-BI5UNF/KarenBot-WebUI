@@ -267,7 +267,7 @@ export async function render(container, ctx) {
     const hostInfo = agentStatus.host || {};
     const executionSelect = h('select', {},
       h('option', { value: 'sandbox', selected: hostInfo.execution_mode !== 'host' },
-        '沙箱联网（bubblewrap，推荐）'),
+        '沙箱内运行（bubblewrap，推荐）'),
       h('option', { value: 'host', selected: hostInfo.execution_mode === 'host' },
         '直接控制整台电脑（高风险）'),
     );
@@ -283,14 +283,14 @@ export async function render(container, ctx) {
           execution_mode: executionSelect.value,
           sandbox_network: !!networkInput.checked,
         }),
-        '本机 Claude Code 执行方式已保存',
+        '本机 Agent 限制已保存',
       ),
     }, '保存本机设置');
 
     fill(agentHost, card(
       'Agent 模式',
       '仅向 KarenBot 的 LLM 提供 Pi / DSH / Claude Code 的工具语义，不启动它们的 TUI/GUI/WebUI。'
-        + '容器可安装多个模式，但同一时间只能激活一个；本机固定使用 Claude Code。',
+        + '容器可安装多个模式，但同一时间只能激活一个。',
       table(
         ['模式', '状态', '版本', '依赖', '操作'],
         rows,
@@ -300,10 +300,10 @@ export async function render(container, ctx) {
         + '原生工具不需要外部 CLI 或额外依赖。'
         + '建议在 设置 → 软件行为 → 工具 schema 档位 选择 agent，获得核心工具常加载 + '
         + 'ToolSearch 延迟加载。'),
-      h('h3', { style: { marginTop: '18px' } }, '本机 Claude Code 执行方式'),
+      h('h3', { style: { marginTop: '18px' } }, '本机 Agent 限制'),
       h('div', { class: 'row row-wrap' },
         h('label', { class: 'field' },
-          h('span', { class: 'field-label' }, '命令执行'),
+          h('span', { class: 'field-label' }, 'Agent 工作方式'),
           executionSelect,
         ),
         h('label', { class: 'field' },

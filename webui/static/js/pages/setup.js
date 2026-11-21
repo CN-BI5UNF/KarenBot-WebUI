@@ -33,7 +33,7 @@ export function render(container, ctx) {
     behavior: {},
     adapter: {
       mode: 'client', host: '127.0.0.1', port: 3000, path: '/',
-      access_token: '', manage_process: false, process_path: '', auto_restart: true,
+      access_token: '',
       whitelist: { mode: 'verify', qq_ids: [], group_ids: [] },
     },
     persona: '大肥鱼',

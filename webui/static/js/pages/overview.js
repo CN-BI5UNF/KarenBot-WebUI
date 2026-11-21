@@ -5,6 +5,9 @@ import { h, fill, card, statCard, formatNumber, formatDuration, statusClass } fr
 import { endpoints } from '../api.js';
 import { icon } from '../icons.js';
 import { openUpdateDialog } from '../releases.js';
+import {
+  adapterDialectLabel, adapterEndpoint, adapterTransportLabel, adapterTypeLabel,
+} from '../adapter_view.js';
 
 const REFRESH_MS = 2000;
 const UPDATE_REFRESH_MS = 60000;
@@ -40,6 +43,8 @@ export async function render(container, ctx) {
   let range = 'today';
   let timer = null;
   let disposed = false;
+  let latestStatus = null;
+  let adapterConfig = null;
 
   const activityCard = h('div', { class: 'card' });
   const providerCard = h('div', { class: 'card' });
@@ -108,20 +113,55 @@ export async function render(container, ctx) {
     );
   }
 
+  // 新后端的 /api/status 只给 type/transport/dialect；具体监听地址在
+  // /api/adapters/status 的 config 摘要里。这里只取一次，页面停留期间
+  // 不额外轮询，避免每 2 秒多打一个接口。
   function renderAdapter(status) {
+    latestStatus = status;
     const adapter = status.adapter;
     const connected = !!status.adapter_connected;
+    // 新后端：type/transport/dialect 才是跨协议通用字段；Telegram 下
+    // mode/host/port 都是 null，不能继续拼 mode://host:port。
+    let detail = '未配置渠道';
+    let endpoint = '';
+    if (adapter) {
+      if (adapter.type) {
+        const typeLabel = adapterTypeLabel(adapter.type);
+        const dialectLabel = adapter.dialect && adapter.dialect !== 'auto'
+          ? adapterDialectLabel(adapter.dialect) : '';
+        detail = [
+          typeLabel,
+          adapterTransportLabel(adapter.transport),
+          dialectLabel && dialectLabel !== typeLabel ? dialectLabel : '',
+        ].filter(Boolean).join(' · ');
+        endpoint = adapterEndpoint(adapter, adapterConfig);
+      } else {
+        detail = `${adapter.name} · ${adapter.mode} · `
+          + `${adapter.host}:${adapter.port}${adapter.path || ''}`;
+      }
+    }
     fill(adapterCard,
       h('div', { class: 'stat-label' }, '渠道状态'),
       h('div', { class: 'stat-value small' },
         h('span', { class: `badge ${connected ? 'ok' : (status.state === 'running' ? 'bad' : 'warn')}` },
           connected ? '已就位' : (status.state === 'running' ? '未连接' : '未运行'))),
-      h('div', { class: 'field-help' },
-        adapter
-          ? `${adapter.name} · ${adapter.mode} · ${adapter.host}:${adapter.port}${adapter.path}`
-          : '未配置渠道'),
+      h('div', { class: 'field-help' }, detail),
+      endpoint ? h('div', { class: 'field-help' }, endpoint) : null,
       h('div', { class: 'field-help' }, `已运行 ${formatDuration(status.uptime_seconds)}`),
     );
+  }
+
+  async function loadAdapterConfig() {
+    try {
+      const data = await endpoints.adapterStatus();
+      const name = data.adapter?.name;
+      const adapters = data.config || {};
+      adapterConfig = (name && adapters[name]) || Object.values(adapters)[0] || null;
+    } catch {
+      // 旧后端没有 /api/adapters/status；保留旧字段展示即可。
+      adapterConfig = null;
+    }
+    if (!disposed && latestStatus) renderAdapter(latestStatus);
   }
 
   function renderProviders(providers) {
@@ -305,7 +345,7 @@ export async function render(container, ctx) {
     }
   }
 
-  await Promise.all([refresh(), refreshUpdate()]);
+  await Promise.all([refresh(), refreshUpdate(), loadAdapterConfig()]);
   timer = setInterval(refresh, REFRESH_MS);
   const updateTimer = setInterval(refreshUpdate, UPDATE_REFRESH_MS);
 

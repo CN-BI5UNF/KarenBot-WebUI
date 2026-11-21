@@ -294,6 +294,13 @@ export const endpoints = {
 
   settings: () => api.get('/api/settings'),
   patchSetting: (path, value) => api.patch('/api/settings', { path, value }),
+
+  // 渠道/协议：协议目录 + 动态配置 + 运行状态（本轮后端新增接口）
+  adapterProtocols: () => api.get('/api/adapters/protocols'),
+  adapterConfig: () => api.get('/api/adapters/config'),
+  adapterStatus: () => api.get('/api/adapters/status'),
+  saveAdapter: (name, payload) =>
+    api.put(`/api/adapters/${encodeURIComponent(name)}`, payload, { timeoutMs: 60000 }),
   patchVision: (payload) => api.patch('/api/settings/vision', payload),
   patchSearch: (payload) => api.patch('/api/settings/web-search', payload),
   probeSearch: (payload) =>
@@ -322,6 +329,13 @@ export const endpoints = {
   saveGroupTriggers: (payload) => api.put('/api/settings/group-triggers', payload),
   blacklist: () => api.get('/api/settings/blacklist'),
   saveBlacklist: (payload) => api.put('/api/settings/blacklist', payload),
+  programs: () => api.get('/api/settings/programs', { timeoutMs: 30000 }),
+  savePrograms: (payload) =>
+    api.put('/api/settings/programs', payload, { timeoutMs: 60000 }),
+  startProgram: (id) =>
+    api.post(`/api/settings/programs/${encodeURIComponent(id)}/start`, {}, { timeoutMs: 30000 }),
+  stopProgram: (id) =>
+    api.post(`/api/settings/programs/${encodeURIComponent(id)}/stop`, {}, { timeoutMs: 30000 }),
 
   storageUsage: () => api.get('/api/storage/usage'),
   storageCategories: () => api.get('/api/storage/categories'),

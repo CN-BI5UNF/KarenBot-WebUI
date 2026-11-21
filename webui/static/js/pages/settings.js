@@ -8,6 +8,8 @@ import { endpoints } from '../api.js';
 import { promptStorageSetup } from '../container_setup.js';
 import { resolvePresetModel, resolveProviderVendor } from '../providers.js';
 import { renderReleaseList, formatDateTime, promptBackendRestart } from '../releases.js';
+import { renderAdapterPanel } from '../adapter_panel.js';
+import { renderProgramsPanel } from '../programs_panel.js';
 
 // 视觉字段由专用面板渲染；这里再按路径兜底一次，避免旧进程尚未加载
 // settings_spec 的 hidden 标记时，通用表单和专用面板重复出现同一批字段。
@@ -24,6 +26,12 @@ const VISION_FIELD_PATHS = new Set([
   'features.vision.video_token_reserve',
   'features.vision.image_limits.max_images_per_request',
   'features.vision.video_limits.max_videos_per_request',
+]);
+
+// 容器网络统一由「容器」页的沙箱开关管理；设置页不再重复展示
+// features.container.network，避免两个入口互相覆盖（对齐 GUI 的收敛处理）。
+const CONTAINER_FIELD_PATHS = new Set([
+  'features.container.network',
 ]);
 
 const SEARCH_FIELD_PATHS = new Set([
@@ -50,8 +58,45 @@ export async function render(container, ctx) {
 
   const groups = payload.groups || [];
   const pathsInfo = payload.paths || {};
-  let activeKey = groups[0]?.key || 'paths';
   let restartHint = null;
+  // 设置页全屏显示，返回目标是进入设置前的页面（直链进入时为总览）。
+  const backTarget = ctx.previous && ctx.previous !== 'settings'
+    ? ctx.previous : 'overview';
+  // 渠道/外部程序表单是批量保存：有未保存修改时拦截返回/切页/关闭浏览器。
+  let adapterDirty = false;
+  let programsDirty = false;
+
+  // 渠道/协议面板依赖本轮新增接口。只有旧后端（404/405）才回退到声明式
+  // 字段表；其它错误保留「渠道与协议」分页并给出重试入口，避免把故障伪装成
+  // 旧后端。与 GUI 的处理保持一致。
+  let protocolData = null;
+  let adapterConfigData = null;
+  let adapterApiAvailable = false;
+  let adapterApiError = null;
+  try {
+    protocolData = await endpoints.adapterProtocols();
+    adapterApiAvailable = Array.isArray(protocolData?.protocols)
+      && protocolData.protocols.length > 0;
+  } catch (e) {
+    if (e.status === 404 || e.status === 405) {
+      adapterApiAvailable = false;
+    } else {
+      adapterApiError = e;
+      adapterApiAvailable = false;
+    }
+  }
+  if (adapterApiAvailable) {
+    try {
+      adapterConfigData = await endpoints.adapterConfig();
+    } catch (e) {
+      if (e.status === 404 || e.status === 405) {
+        // 协议目录在、配置接口不在：按旧后端回退。
+        adapterApiAvailable = false;
+      }
+      // Runtime 尚未就绪（503）时仍展示协议卡片；表单会给出重试。
+      adapterConfigData = null;
+    }
+  }
 
   const nav = h('div', { class: 'settings-nav' });
   const bodyHost = h('div', {});
@@ -61,10 +106,22 @@ export async function render(container, ctx) {
   // 提示挂在 body 里会被一起冲掉。
   const hintHost = h('div', {});
 
-  const tabs = [
-    ...groups.map((g) => ({ key: g.key, title: g.title })),
-    { key: 'paths', title: '路径与诊断' },
-  ];
+  const useAdapterPanel = adapterApiAvailable || Boolean(adapterApiError);
+  const tabs = [];
+  if (useAdapterPanel) {
+    tabs.push({ key: 'adapter', title: '渠道与协议' });
+  }
+  for (const group of groups) {
+    // 渠道主分页改由协议面板统一管理；「渠道高级」保留为跳转说明，
+    // 与 GUI 的 advanced_only 占位一致。
+    if (useAdapterPanel && group.key === 'adapter') {
+      continue;
+    }
+    tabs.push({ key: group.key, title: group.title });
+  }
+  tabs.push({ key: 'paths', title: '路径与诊断' });
+
+  let activeKey = tabs[0]?.key || 'paths';
   if (ctx.section && tabs.some((tab) => tab.key === ctx.section)) {
     activeKey = ctx.section;
   }
@@ -1099,6 +1156,7 @@ export async function render(container, ctx) {
     }
     const notification = status.notification || {};
     const moduleMode = status.mode === 'module';
+    const distributionMode = moduleMode && !!status.distribution;
     const frontendKey = status.frontend || 'gui';
     const frontendLabel = status.frontend_label || '前端';
     const statusLine = h('div', { class: 'field-help' });
@@ -1124,12 +1182,17 @@ export async function render(container, ctx) {
         const checked = await endpoints.updateCheck();
         resultHost.replaceChildren(renderUpdateResult(checked));
         if (checked.mode === 'module') {
+          const distribution = (checked.distribution_updates || [])
+            .map((item) => item.name || item.release_tag || item.tag)
+            .join('、');
           const updates = (checked.updates || [])
             .map((item) => `${item.component_label || item.component} ${item.release_tag || item.tag}`)
             .join('、');
-          statusLine.textContent = updates
-            ? `发现 Latest 更新：${updates}`
-            : '没有可自动提示的 Latest 更新；Pre-release 可在下方手动选择。';
+          statusLine.textContent = distribution
+            ? `发现统一发行版：${distribution}`
+            : (updates
+              ? `发现 Latest 更新：${updates}`
+              : '没有可自动提示的 Latest 更新；Pre-release 可在下方手动选择。');
         } else if (checked.available) {
           statusLine.textContent = `发现新版本：${checked.available_release?.name
             || checked.available_release?.tag || checked.target_label}`;
@@ -1196,10 +1259,12 @@ export async function render(container, ctx) {
       table(['项目', '值'], rows),
       h('label', { class: 'switch' }, notifyInput, h('span', {}, '接收更新提醒')),
       h('p', { class: 'field-help' },
-        moduleMode
-          ? '后端和当前前端是两个独立组件；下面分别列出各自的版本和 Release。'
-          : '应用版本会备份当前提交并重启服务；依赖文件变化时会自动安装，失败则回滚源码。'
-            + '镜像站会提供将执行的代码，请只使用可信 https 镜像。'),
+        distributionMode
+          ? '当前使用 KarenBot 统一发行版：每次更新会同时更新后端与当前前端，不能只更新其中一个组件。'
+          : (moduleMode
+            ? '后端和当前前端是两个独立组件；下面分别列出各自的版本和 Release。'
+            : '应用版本会备份当前提交并重启服务；依赖文件变化时会自动安装，失败则回滚源码。'
+              + '镜像站会提供将执行的代码，请只使用可信 https 镜像。')),
       h('p', { class: 'field-help' },
         '“重启 Runtime”只重建运行时，不会重新导入 Python 代码；'
         + '更新到新版本或改了后端代码后，请用“重启后端”。'),
@@ -1246,7 +1311,34 @@ export async function render(container, ctx) {
       return cardNode;
     }
 
-    if (moduleMode) {
+    if (distributionMode) {
+      const components = status.components || {};
+      const releaseHost = h('div', {});
+      let handle = null;
+      const refreshBtn = h('button', { class: 'btn btn-sm' }, '刷新版本列表');
+      refreshBtn.addEventListener('click', () => {
+        if (handle) handle.refresh();
+      });
+      const versions = h('div', {},
+        h('p', { class: 'field-help' }, '后端'),
+        table(['项目', '值'], componentRows(components.backend || {})),
+        h('p', { class: 'field-help' }, frontendLabel),
+        table(['项目', '值'], componentRows(components[frontendKey] || {})));
+      nodes.push(card('KarenBot 发行版',
+        '统一发行版同时更新后端与当前前端；Pre-release 不会自动提示，可在下方手动选择。',
+        versions,
+        h('div', { class: 'row' },
+          h('span', { class: 'field-help' }, '每个版本都可以展开/收起更新日志。'),
+          h('div', { class: 'spacer' }),
+          refreshBtn),
+        releaseHost));
+      renderReleaseList(releaseHost, ctx, { showSummary: false })
+        .then((list) => {
+          handle = list;
+          releaseLists.push(list);
+        })
+        .catch((e) => fill(releaseHost, empty(`读取版本列表失败：${e.message}`)));
+    } else if (moduleMode) {
       const components = status.components || {};
       nodes.push(componentCard('后端更新', components.backend || {}, 'backend'));
       nodes.push(componentCard(
@@ -1687,19 +1779,34 @@ export async function render(container, ctx) {
           ? '应用更新后自动安装，失败会回滚源码'
           : '需手动安装，禁止自动应用'}）：${checked.dependency_changes.join(', ')}`)
       : null;
-    const updates = (checked.updates || []).filter((item) => item && item.component);
-    const grouped = new Map();
-    for (const item of updates) {
-      if (!grouped.has(item.component)) grouped.set(item.component, []);
-      grouped.get(item.component).push(item);
+    const distributionUpdates = (checked.distribution_updates || [])
+      .filter((item) => item && item.component === 'distribution');
+    let groups;
+    if (distributionUpdates.length) {
+      groups = distributionUpdates.map((item) =>
+        h('div', { class: 'release-component-result' },
+          h('p', { class: 'field-help' }, 'KarenBot 统一发行版'),
+          ...Object.entries(item.components || {}).map(([component, meta]) =>
+            h('p', {},
+              `${component}：${meta.version || meta.tag || '—'}`)),
+          item.prerelease
+            ? h('p', { class: 'field-help' }, 'Pre-release，极不稳定')
+            : null));
+    } else {
+      const updates = (checked.updates || []).filter((item) => item && item.component);
+      const grouped = new Map();
+      for (const item of updates) {
+        if (!grouped.has(item.component)) grouped.set(item.component, []);
+        grouped.get(item.component).push(item);
+      }
+      groups = [...grouped.entries()].map(([component, items]) =>
+        h('div', { class: 'release-component-result' },
+          h('p', { class: 'field-help' },
+            component === 'backend' ? '后端更新' : '前端更新'),
+          ...items.map((item) => h('p', {},
+            `${item.component_label || component}：${item.release_tag || item.tag || '—'}`
+            + (item.prerelease ? '（Pre-release，极不稳定）' : '')))));
     }
-    const groups = [...grouped.entries()].map(([component, items]) =>
-      h('div', { class: 'release-component-result' },
-        h('p', { class: 'field-help' },
-          component === 'backend' ? '后端更新' : '前端更新'),
-        ...items.map((item) => h('p', {},
-          `${item.component_label || component}：${item.release_tag || item.tag || '—'}`
-          + (item.prerelease ? '（Pre-release，极不稳定）' : '')))));
     return h('div', {},
       h('p', {}, `目标：${checked.target_name || checked.target_label || '—'}`
         + `（${checked.target_commit_short || '—'}）`),
@@ -1708,6 +1815,47 @@ export async function render(container, ctx) {
       deps,
       ...warnings,
     );
+  }
+
+  function renderAdapterError(host, error) {
+    fill(host, card('渠道与协议', '',
+      empty(`无法读取协议目录：${error.message}`, {
+        subtitle: 'Runtime 未就绪时可能返回 503；旧后端没有 /api/adapters/* 时会自动回退。',
+        iconName: 'settings',
+      }),
+      h('div', { class: 'row' },
+        h('button', {
+          class: 'btn btn-primary',
+          onclick: () => ctx.navigate('settings', { force: true }),
+        }, '重试读取渠道配置')),
+    ));
+  }
+
+  function renderAdapterAdvancedNotice(host) {
+    fill(host, card('渠道高级', '',
+      h('p', { class: 'card-sub' },
+        '接入方式、Webhook、重连与协议端托管等高级参数已合并到「渠道与协议」页面，'
+        + '由后端 config_schema 动态生成，避免和完整适配器保存互相覆盖。'),
+      h('div', { class: 'row' },
+        h('button', {
+          class: 'btn btn-primary',
+          onclick: () => requestShow('adapter'),
+        }, '打开渠道设置')),
+    ));
+  }
+
+  function requestShow(nextKey) {
+    if (nextKey === activeKey) return;
+    const dirty = adapterDirty || programsDirty;
+    if (dirty
+        && !confirm('有尚未保存的渠道/外部程序修改，切换分页会丢失。确定继续？')) {
+      return;
+    }
+    if (dirty) {
+      adapterDirty = false;
+      programsDirty = false;
+    }
+    show(nextKey);
   }
 
   async function show(key) {
@@ -1723,14 +1871,47 @@ export async function render(container, ctx) {
     }
     if (key === 'paths') return renderPaths(panelBody);
 
+    if (adapterApiError && (key === 'adapter' || key === 'adapter_advanced')) {
+      return renderAdapterError(panelBody, adapterApiError);
+    }
+
+    if (key === 'adapter' && adapterApiAvailable) {
+      return renderAdapterPanel(panelBody, ctx, {
+        protocolData,
+        configData: adapterConfigData,
+        groups,
+        secretsIndex: payload.secrets_index || [],
+        markRestart: () => markRestart(),
+        onDirtyChange: (value) => { adapterDirty = Boolean(value); },
+      });
+    }
+
+    if (key === 'adapter_advanced' && adapterApiAvailable) {
+      return renderAdapterAdvancedNotice(panelBody);
+    }
+
+    if (key === 'programs') {
+      return renderProgramsPanel(panelBody, ctx, {
+        markRestart: () => markRestart(),
+        onDirtyChange: (value) => { programsDirty = Boolean(value); },
+      });
+    }
+
     const group = groups.find((g) => g.key === key);
     if (!group) return fill(panelBody, empty('未知分页'));
 
-    const nodes = [h('p', { class: 'card-sub' }, group.desc || '')];
+    const nodes = [];
+    if (!useAdapterPanel
+        && (key === 'adapter' || key === 'adapter_advanced')) {
+      nodes.push(h('p', { class: 'field-help' },
+        '当前后端未提供 /api/adapters 协议接口，已回退到旧字段编辑器。'));
+    }
+    nodes.push(h('p', { class: 'card-sub' }, group.desc || ''));
     const visibleFields = group.fields.filter(
       (spec) => !spec.hidden
         && !VISION_FIELD_PATHS.has(spec.path)
-        && !SEARCH_FIELD_PATHS.has(spec.path));
+        && !SEARCH_FIELD_PATHS.has(spec.path)
+        && !CONTAINER_FIELD_PATHS.has(spec.path));
     if (!visibleFields.length) {
       if (group.fields.length) {
         nodes.push(empty('这个分页的选项在下方专用面板中设置'));
@@ -1835,13 +2016,22 @@ export async function render(container, ctx) {
   }
 
   fill(nav, ...tabs.map((t) =>
-    h('button', { dataset: { key: t.key }, onclick: () => show(t.key) }, t.title)));
+    h('button', { dataset: { key: t.key }, onclick: () => requestShow(t.key) }, t.title)));
 
   fill(container,
     h('div', { class: 'page-head' },
-      h('div', {},
-        h('h1', { class: 'page-title' }, '设置'),
-        h('p', { class: 'page-desc' }, '改动即时写入 config.yaml；需要重启的会给出提示。'),
+      h('div', { class: 'settings-title-row' },
+        h('button', {
+          type: 'button',
+          class: 'btn btn-sm settings-back',
+          title: '返回上一页（Esc / Alt+←）',
+          'aria-label': '返回上一页',
+          onclick: () => ctx.navigate(backTarget),
+        }, '← 返回'),
+        h('div', {},
+          h('h1', { class: 'page-title' }, '设置'),
+          h('p', { class: 'page-desc' }, '改动即时写入 config.yaml；需要重启的会给出提示。'),
+        ),
       ),
     ),
     hintHost,
@@ -1849,5 +2039,7 @@ export async function render(container, ctx) {
   );
 
   await show(activeKey);
-  return {};
+  return {
+    isDirty: () => adapterDirty || programsDirty,
+  };
 }

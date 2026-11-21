@@ -553,11 +553,6 @@ export function renderAdapter(host, ctx, state) {
     type: 'password', value: a.access_token || '',
     oninput: (e) => { a.access_token = e.target.value.trim(); },
   });
-  const manage = h('input', {
-    type: 'checkbox', checked: !!a.manage_process,
-    onchange: (e) => { a.manage_process = e.target.checked; rerender(ctx); },
-  });
-
   const wlMode = h('select', {
     onchange: (e) => { a.whitelist.mode = e.target.value; rerender(ctx); },
   });
@@ -579,23 +574,7 @@ export function renderAdapter(host, ctx, state) {
       field('地址', hostInput), field('端口', port), field('路径', path),
     ),
     field('Access Token', token, 'NapCat 里配置的那个，留空表示没设'),
-    h('label', { class: 'switch' }, manage, '由 Karen 拉起 NapCat 进程'),
   ];
-
-  if (a.manage_process) {
-    const processPath = h('input', {
-      value: a.process_path || '', placeholder: 'NapCat 启动脚本的绝对路径',
-      oninput: (e) => { a.process_path = e.target.value.trim(); },
-    });
-    const autoRestart = h('input', {
-      type: 'checkbox', checked: a.auto_restart !== false,
-      onchange: (e) => { a.auto_restart = e.target.checked; },
-    });
-    nodes.push(
-      field('NapCat 启动路径', processPath),
-      h('label', { class: 'switch' }, autoRestart, '断线自动重连'),
-    );
-  }
 
   nodes.push(field('入站策略', wlMode));
 
@@ -828,9 +807,6 @@ export function buildPayload(state) {
       port: state.adapter.port,
       path: state.adapter.path,
       access_token: state.adapter.access_token || '',
-      manage_process: !!state.adapter.manage_process,
-      process_path: state.adapter.process_path || '',
-      auto_restart: state.adapter.auto_restart !== false,
       whitelist: {
         mode: state.adapter.whitelist.mode,
         qq_ids: state.adapter.whitelist.qq_ids || [],

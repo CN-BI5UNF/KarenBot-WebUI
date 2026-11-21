@@ -3,11 +3,12 @@
 // 导航结构照搬原 PySide6 仪表盘（ui/dashboard/layout.py 的 NAV_ITEMS），
 // 顺序、中文标题一致，末尾追加 WebUI 新增的「黑白名单」。
 
-import { h, fill, qs, formatDuration, empty } from './dom.js';
+import { h, fill, qs, formatDuration, empty, modal, table } from './dom.js';
 import { api, endpoints, setUnauthorizedHandler } from './api.js';
 import { icon } from './icons.js';
 import { EventStream } from './ws.js';
 import { initTooltips } from './tooltip.js';
+import { adapterDialectLabel, adapterTransportLabel, adapterTypeLabel } from './adapter_view.js';
 
 import * as overview from './pages/overview.js';
 import * as chats from './pages/chats.js';
@@ -42,10 +43,24 @@ const NAV_ITEMS = [
   { key: 'storage', title: '存储与数据', hint: '存储、清理、备份与卸载', icon: 'storage', page: storage },
   { key: 'blacklist', title: '黑白名单', hint: '群与用户访问控制', icon: 'blacklist', page: blacklist },
   { key: 'group_triggers', title: '群聊触发', hint: '按群 @ 触发窗口', icon: 'chats', page: groupTriggers },
-  { key: 'settings', title: '设置', hint: '运行参数、模型与路径诊断', icon: 'settings', page: settings },
 ];
 
+// 设置不再占用主导航：侧栏左下角只留一个齿轮入口，但仍是正式路由。
+// 深链（例如知识页跳「设置 → 功能」）仍然通过 navigate('settings', …) 进入。
+const HIDDEN_NAV_ITEMS = [
+  { key: 'settings', title: '设置', hint: '运行参数、渠道协议与路径诊断', icon: 'gear', page: settings },
+];
+
+const ALL_NAV_ITEMS = [...NAV_ITEMS, ...HIDDEN_NAV_ITEMS];
+
 const TOAST_MS = 3200;
+
+// 外部程序失败按 (id, failure_seq) 去重：初始 status 与 WebSocket 快照
+// 可能重复投递同一次失败，不能弹两次。
+const programFailureSeen = new Set();
+let programFailureModalShown = false;
+let programFailureModalOpen = false;
+let streamEverConnected = false;
 
 const state = {
   status: null,
@@ -55,6 +70,10 @@ const state = {
   navigating: null,
   navigationSeq: 0,
   pendingSettingsSection: null,
+  // 进入设置前的页面；设置页全屏后用它做「返回」目标。
+  settingsReturnRoute: 'overview',
+  // 当前页面提供的「未保存修改」检查函数。返回 true 时拦截离开/关闭。
+  dirtyGuard: null,
   cleanup: null,
   stream: null,
 };
@@ -74,6 +93,24 @@ function toast(message, kind = '') {
 // 顶栏 / 侧栏状态
 // ============================================================
 
+// 新后端的 adapter 对象带 type/transport/dialect；Telegram 下 host/port 为 null，
+// 顶栏和总览都不能再拼 mode://host:port。旧后端没有 type 时退回旧字段。
+function adapterSummary(adapter) {
+  if (!adapter) return '';
+  if (adapter.type) {
+    const typeLabel = adapterTypeLabel(adapter.type);
+    const dialectLabel = adapter.dialect && adapter.dialect !== 'auto'
+      ? adapterDialectLabel(adapter.dialect) : '';
+    return [
+      typeLabel,
+      adapterTransportLabel(adapter.transport),
+      dialectLabel && dialectLabel !== typeLabel ? dialectLabel : '',
+    ].filter(Boolean).join(' · ');
+  }
+  const endpoint = adapter.host ? `${adapter.host}:${adapter.port ?? ''}` : '';
+  return [adapter.name, adapter.mode, endpoint].filter(Boolean).join(' · ');
+}
+
 function applyStatus(status) {
   state.status = status;
 
@@ -90,9 +127,10 @@ function applyStatus(status) {
     adapterBadge.textContent = '未配置渠道';
     adapterBadge.className = 'badge warn';
   } else {
+    const summary = adapterSummary(adapter);
     adapterBadge.textContent = connected
-      ? `已就位 · ${adapter.mode}://${adapter.host}:${adapter.port}`
-      : '渠道未连接';
+      ? `已就位${summary ? ` · ${summary}` : ''}`
+      : `渠道未连接${summary ? ` · ${summary}` : ''}`;
     adapterBadge.className = `badge ${connected ? 'ok' : 'idle'}`;
   }
 
@@ -110,6 +148,63 @@ function applyStatus(status) {
     dot.className = 'dot warn';
     text.textContent = 'Runtime 未运行';
   }
+
+  notifyProgramFailures(status);
+}
+
+function notifyProgramFailures(status) {
+  if (!status || status.state !== 'running') return;
+  const failures = [];
+  for (const item of status.programs || []) {
+    if (!item || item.state !== 'failed' || !item.failure_seq) continue;
+    const id = String(item.id || '');
+    if (!id) continue;
+    const key = `${id}:${item.failure_seq}`;
+    failures.push({
+      key,
+      name: item.name || id,
+      error: item.error || '启动失败',
+    });
+  }
+  const active = new Set(failures.map((item) => item.key));
+  for (const key of programFailureSeen) {
+    if (!active.has(key)) programFailureSeen.delete(key);
+  }
+  const fresh = failures.filter((item) => !programFailureSeen.has(item.key));
+  if (!fresh.length) return;
+  for (const item of fresh) programFailureSeen.add(item.key);
+
+  const summary = fresh.length === 1
+    ? `外部程序「${fresh[0].name}」启动失败：${fresh[0].error}`
+    : `${fresh.length} 个外部程序启动失败：${fresh[0].name} 等`;
+  if (programFailureModalShown || programFailureModalOpen) {
+    toast(summary, 'error');
+    return;
+  }
+
+  programFailureModalShown = true;
+  programFailureModalOpen = true;
+  const dialog = modal({
+    title: '外部程序启动失败',
+    subtitle: '可在 设置 → 外部程序 查看详情、重试或修改配置。',
+    wide: true,
+    body: table(
+      ['程序', '错误'],
+      fresh.map((item) => h('tr', {},
+        h('td', {}, item.name),
+        h('td', { style: { wordBreak: 'break-all' } }, item.error),
+      )),
+    ),
+    footer: [
+      h('button', {
+        class: 'btn btn-primary',
+        type: 'button',
+        onclick: () => dialog.close(),
+      }, '知道了'),
+    ],
+    onClose: () => { programFailureModalOpen = false; },
+  });
+  document.body.append(dialog.el);
 }
 
 // ============================================================
@@ -125,20 +220,46 @@ function normalizeRouteKey(key) {
 
 function currentRouteKey() {
   const fromHash = normalizeRouteKey(location.hash.replace(/^#\/?/, ''));
-  return NAV_ITEMS.some((x) => x.key === fromHash) ? fromHash : 'overview';
+  return ALL_NAV_ITEMS.some((x) => x.key === fromHash) ? fromHash : 'overview';
+}
+
+function syncNavActive(key) {
+  for (const btn of document.querySelectorAll('.nav-item')) {
+    btn.classList.toggle('active', btn.dataset.key === key);
+  }
+  const settingsBtn = qs('#btn-settings');
+  if (settingsBtn) settingsBtn.classList.toggle('active', key === 'settings');
 }
 
 async function navigate(key, { force = false, section = null } = {}) {
   key = normalizeRouteKey(key);
-  const item = NAV_ITEMS.find((x) => x.key === key);
+  const item = ALL_NAV_ITEMS.find((x) => x.key === key);
   if (!item) return;
   if (section && key === 'settings') {
     state.pendingSettingsSection = String(section);
+  }
+  // 记录进入设置前的页面（直链进入时保持默认总览）。
+  if (key === 'settings' && state.current && state.current !== 'settings') {
+    state.settingsReturnRoute = state.current;
   }
   // navigating 期间允许切回上一页：此时 state.current 仍是上一页，
   // 只看 current 会把“返回/再点旧页”误判成重复点击。
   if (!force && state.navigating === null && state.current === key && !section) return;
   if (!force && state.navigating === key && !section) return;
+
+  // 有未保存修改时先确认。浏览器的 hash 可能已经因后退而变化，
+  // 取消时用 replaceState 把地址恢复成当前页面，避免地址和内容不一致。
+  if (!force && typeof state.dirtyGuard === 'function' && state.dirtyGuard()) {
+    const ok = confirm('有未保存的修改，离开后这些修改会丢失。确定离开？');
+    if (!ok) {
+      const currentHash = `#/${state.current || 'overview'}`;
+      if (location.hash !== currentHash) {
+        history.replaceState(null, '', currentHash);
+      }
+      return;
+    }
+  }
+  state.dirtyGuard = null;
 
   if (typeof state.cleanup === 'function') {
     try { state.cleanup(); } catch (e) { console.error(e); }
@@ -147,9 +268,10 @@ async function navigate(key, { force = false, section = null } = {}) {
 
   location.hash = `#/${key}`;
 
-  for (const btn of document.querySelectorAll('.nav-item')) {
-    btn.classList.toggle('active', btn.dataset.key === key);
-  }
+  syncNavActive(key);
+  // 设置页铺满窗口：隐藏侧栏，保留顶栏；离开设置时恢复。
+  const shell = qs('#shell');
+  if (shell) shell.classList.toggle('settings-mode', key === 'settings');
 
   // 每次导航换一个新的 #content 节点：旧页面即使还在 await，
   // 后续写 DOM 也只会写进已经脱离文档的旧节点，不会覆盖新页面。
@@ -165,6 +287,8 @@ async function navigate(key, { force = false, section = null } = {}) {
     status: state.status,
     navigate,
     section: requestedSection,
+    // 设置页「返回」目标：进入设置前的页面，默认总览。
+    previous: state.settingsReturnRoute || 'overview',
     onEvent: (handler) => state.stream.subscribe(handler),
   };
 
@@ -184,11 +308,14 @@ async function navigate(key, { force = false, section = null } = {}) {
     }
     state.current = key;
     state.cleanup = result && result.destroy ? result.destroy : null;
+    state.dirtyGuard = result && typeof result.isDirty === 'function'
+      ? result.isDirty : null;
   } catch (e) {
     console.error(e);
     if (seq !== state.navigationSeq) return;
     state.current = null;
     state.cleanup = null;
+    state.dirtyGuard = null;
     fill(container, h('div', { class: 'empty' }, `页面加载失败：${e.message}`));
   } finally {
     if (seq === state.navigationSeq) state.navigating = null;
@@ -314,6 +441,7 @@ function showBootError(error) {
   qs('#login-gate').classList.add('hidden');
   qs('#setup-gate').classList.add('hidden');
   qs('#shell').classList.remove('hidden');
+  qs('#shell').classList.remove('settings-mode');
 
   fill(qs('#content'), h('div', { class: 'page' },
     h('div', { class: 'empty' },
@@ -330,6 +458,7 @@ function showBootError(error) {
 }
 
 function showLogin() {
+  state.dirtyGuard = null;
   qs('#login-gate').classList.remove('hidden');
   qs('#shell').classList.add('hidden');
   qs('#setup-gate').classList.add('hidden');
@@ -387,7 +516,18 @@ async function enterApp() {
   if (!state.stream) {
     state.stream = new EventStream();
     state.stream.onConnectionChange = (connected) => {
-      if (!connected && state.status) {
+      if (connected) {
+        // 后端重启后 failure_seq 可能从头开始；重连时清空去重集合，
+        // 让新服务端的当前失败能重新提醒。首次连接不清，避免和
+        // enterApp 的初始 /api/status 重复弹窗。
+        if (streamEverConnected) {
+          programFailureSeen.clear();
+          programFailureModalShown = false;
+        }
+        streamEverConnected = true;
+        return;
+      }
+      if (state.status) {
         qs('#side-dot').className = 'dot bad';
         qs('#side-conn-text').textContent = '控制台连接断开，重连中…';
       }
@@ -435,12 +575,50 @@ async function loadVersionMark() {
   el.classList.remove('hidden');
 }
 
+function isEditableTarget(target) {
+  return target instanceof Element
+    && Boolean(target.closest('input, textarea, select, [contenteditable="true"]'));
+}
+
 function wireChrome() {
   window.addEventListener('hashchange', () => navigate(currentRouteKey()));
+
+  // 设置页全屏时的退出方式：返回按钮、Esc、Alt+←、Ctrl+,（与 GUI 对齐）。
+  document.addEventListener('keydown', (event) => {
+    if (!state.status) return;
+    // 弹窗自己处理按键（Esc 关闭弹窗），不要顺手退出设置。
+    if (document.querySelector('.modal-backdrop')) return;
+    const leaveSettings = () => navigate(state.settingsReturnRoute || 'overview');
+
+    if (event.key === 'Escape' && state.current === 'settings') {
+      if (isEditableTarget(event.target)) return;
+      event.preventDefault();
+      leaveSettings();
+      return;
+    }
+    if (event.altKey && event.key === 'ArrowLeft' && state.current === 'settings') {
+      if (isEditableTarget(event.target)) return;
+      event.preventDefault();
+      leaveSettings();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key === ',') {
+      event.preventDefault();
+      if (state.current === 'settings') leaveSettings();
+      else navigate('settings');
+    }
+  });
 
   // 顶栏图标（index.html 里只留空的 button，图标在这里挂，才能复用 icons.js）
   fill(qs('#btn-restart'), icon('restart', { size: 18 }));
   fill(qs('#btn-logout'), icon('logout', { size: 18 }));
+
+  // 左下角设置入口：只有齿轮图标，点击进入独立的设置路由。
+  const settingsBtn = qs('#btn-settings');
+  if (settingsBtn) {
+    fill(settingsBtn, icon('gear', { size: 18 }));
+    settingsBtn.onclick = () => navigate('settings');
+  }
   applyTheme(localStorage.getItem('karen-theme') || 'auto');
 
   qs('#btn-theme').onclick = () => {
@@ -456,8 +634,12 @@ function wireChrome() {
 
   qs('#btn-restart').onclick = async (event) => {
     const btn = event.currentTarget;
+    const dirtyWarning = typeof state.dirtyGuard === 'function' && state.dirtyGuard()
+      ? '\n\n注意：当前有未保存的修改，重启后会丢失。'
+      : '';
     if (!confirm('重启 Runtime？正在处理的对话会被中断。\n\n'
-      + '只重建运行时，不会重新加载 Python 代码；更新代码后请使用“重启后端”。')) return;
+      + '只重建运行时，不会重新加载 Python 代码；更新代码后请使用“重启后端”。'
+      + dirtyWarning)) return;
     btn.disabled = true;
     try {
       await endpoints.restart();
@@ -472,10 +654,21 @@ function wireChrome() {
   };
 
   qs('#btn-logout').onclick = async () => {
+    if (typeof state.dirtyGuard === 'function' && state.dirtyGuard()
+        && !confirm('有未保存的修改，退出登录会丢失。确定退出？')) return;
+    state.dirtyGuard = null;
     try { await endpoints.logout(); } catch { /* 已失效也无所谓 */ }
     if (state.stream) { state.stream.close(); state.stream = null; }
     showLogin();
   };
+
+  // 关闭标签页 / 刷新 / 外部跳转时，浏览器自带的离开确认。
+  window.addEventListener('beforeunload', (event) => {
+    if (typeof state.dirtyGuard === 'function' && state.dirtyGuard()) {
+      event.preventDefault();
+      event.returnValue = '';
+    }
+  });
 
   setUnauthorizedHandler(() => {
     if (state.stream) { state.stream.close(); state.stream = null; }

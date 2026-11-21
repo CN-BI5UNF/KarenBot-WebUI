@@ -234,7 +234,10 @@ export async function renderReleaseList(
 
   function renderList() {
     if (!listing) return;
-    const releases = (listing.releases || []).filter(
+    const source = (listing.distribution_releases || []).length
+      ? listing.distribution_releases
+      : (listing.releases || []);
+    const releases = source.filter(
       (release) => !component || release.component === component,
     );
     const errors = listing.errors || {};
@@ -286,9 +289,13 @@ export async function renderReleaseList(
       const extra = needsExtraConfirm
         ? '\n\n这是回退/切换操作，当前分支会被移动到目标提交；旧 HEAD 会先备份。'
         : '';
+      const train = (checked.distribution_updates || []).length
+        ? '\n\n这是 KarenBot 统一发行版：会同时更新后端和当前前端。'
+        : '';
       if (!confirm(
         `确认${verb}到“${checked.target_name || release.name || release.tag}”？\n\n`
         + '更新完成后可选择是否立即重启后端；用户数据目录不会被覆盖。'
+        + train
         + extra
         + (warnings ? `\n\n${warnings}` : ''),
       )) {

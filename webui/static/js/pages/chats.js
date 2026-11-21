@@ -355,7 +355,7 @@ export async function render(container, ctx) {
   const injectWho = h('input', {
     style: { maxWidth: '110px' },
     value: '10001',
-    title: '发送者 QQ 号',
+    title: '发送者用户 ID（QQ 号或 Telegram 用户 ID）',
   });
 
   async function doInject() {
@@ -393,7 +393,7 @@ export async function render(container, ctx) {
       h('div', {},
         h('h1', { class: 'page-title' }, '对话'),
         h('p', { class: 'page-desc' },
-          '与 QQ 完全一致的收发记录。底部输入框可在不接 NapCat 的情况下直接试跑人格。'),
+          '与渠道完全一致的收发记录。底部输入框可在不接协议端的情况下直接试跑人格。'),
       ),
       h('div', { class: 'row' },
         convSearch,

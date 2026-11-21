@@ -22,8 +22,7 @@ export async function render(container, ctx) {
 
   const enabledInput = h('input', { type: 'checkbox' });
   const groupInput = h('input', {
-    placeholder: '输入群号',
-    inputmode: 'numeric',
+    placeholder: '输入群 ID（Telegram 群为负数）',
     autocomplete: 'off',
   });
   const maxInput = h('input', {
@@ -74,7 +73,7 @@ export async function render(container, ctx) {
       return;
     }
     fill(rulesHost, table(
-      ['群号', '最多连续消息数', '时间窗口（分钟）', '过滤缓存条数', '操作'],
+      ['群 ID', '最多连续消息数', '时间窗口（分钟）', '过滤缓存条数', '操作'],
       data.groups.map((rule, index) => {
         const max = h('input', {
           type: 'number',
@@ -168,8 +167,8 @@ export async function render(container, ctx) {
   function addRule() {
     if (!data) return;
     const groupId = asInt(groupInput.value, 0);
-    if (groupId <= 0) {
-      ctx.toast('群号必须是正整数', 'error');
+    if (groupId === 0) {
+      ctx.toast('群 ID 必须是非零整数（Telegram 群/频道为负数）', 'error');
       return;
     }
     if (data.groups.some((rule) => rule.group_id === groupId)) {

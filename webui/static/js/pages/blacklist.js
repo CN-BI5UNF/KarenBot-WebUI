@@ -8,14 +8,30 @@
 import { h, fill, card, empty, field, formatNumber } from '../dom.js';
 import { endpoints } from '../api.js';
 
+// 新后端把 ID 统一成字符串：QQ 是数字串，Telegram 用户 ID 是数字，
+// Telegram 群/频道 ID 是负数（如 -1001234567890）。前端不再转 Number、
+// 也不再过滤负数，只去掉空白项并去重。
+function normalizeIds(values) {
+  return [...new Set(
+    (values || []).map((value) => String(value).trim()).filter(Boolean),
+  )];
+}
+
+function sortIds(values) {
+  return normalizeIds(values).sort((a, b) => {
+    const na = Number(a);
+    const nb = Number(b);
+    if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+    return a.localeCompare(b);
+  });
+}
+
 function parseIds(raw) {
-  return String(raw)
-    .replace(/[，、;；\s]+/g, ',')
-    .split(',')
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .map((x) => Number(x))
-    .filter((x) => Number.isFinite(x) && x > 0);
+  return normalizeIds(
+    String(raw)
+      .replace(/[，、;；\s]+/g, ',')
+      .split(','),
+  );
 }
 
 export async function render(container, ctx) {
@@ -43,13 +59,13 @@ export async function render(container, ctx) {
     const addBtn = h('button', { class: 'btn' }, '添加');
 
     function renderChips() {
-      const ids = getIds();
+      const ids = normalizeIds(getIds());
       fill(chips, ...(ids.length
-        ? ids.map((id) => h('span', { class: 'chip' }, String(id),
+        ? ids.map((id) => h('span', { class: 'chip' }, id,
           h('button', {
             title: '移出名单',
             onclick: () => {
-              setIds(getIds().filter((item) => item !== id));
+              setIds(normalizeIds(getIds()).filter((item) => item !== id));
               dirty = true;
               renderChips();
               renderStatus();
@@ -61,8 +77,7 @@ export async function render(container, ctx) {
     function add() {
       const ids = parseIds(input.value);
       if (!ids.length) return;
-      const merged = [...new Set([...getIds(), ...ids])].sort((a, b) => a - b);
-      setIds(merged);
+      setIds(sortIds([...getIds(), ...ids]));
       input.value = '';
       dirty = true;
       renderChips();
@@ -116,7 +131,7 @@ export async function render(container, ctx) {
     const blackQq = data.blacklist?.qq_ids?.length || 0;
     const blackGroup = data.blacklist?.group_ids?.length || 0;
     const blackState = blackEnabled.checked
-      ? `黑名单生效中（${formatNumber(blackQq)} 个 QQ、${formatNumber(blackGroup)} 个群）`
+      ? `黑名单生效中（${formatNumber(blackQq)} 个用户、${formatNumber(blackGroup)} 个群）`
       : `黑名单已关闭（名单保留 ${formatNumber(blackQq + blackGroup)} 项，不拦截）`;
     const warning = whiteMode === 'whitelist' && !whiteQq && !whiteGroup
       ? ' 当前白名单为空，保存后所有入站消息都会被拦截。'
@@ -128,6 +143,12 @@ export async function render(container, ctx) {
 
   async function save() {
     if (!data || busy) return;
+    const whiteCount = (data.whitelist?.qq_ids?.length || 0)
+      + (data.whitelist?.group_ids?.length || 0);
+    if (modeSelect.value === 'whitelist' && whiteCount === 0
+        && !confirm('当前入站策略是 whitelist，且白名单为空；保存后所有入站消息都会被拦截。确定保存？')) {
+      return;
+    }
     busy = true;
     saveBtn.disabled = true;
     try {
@@ -172,22 +193,25 @@ export async function render(container, ctx) {
       h('div', { class: 'row' }, saveBtn),
     ),
 
-    card('白名单', '限制哪些 QQ 号或群可以触发回复；仅在 mode=whitelist 时严格生效。',
+    card('白名单', '限制哪些用户或群可以触发回复；仅在 mode=whitelist 时严格生效。'
+      + 'ID 同时适用于 QQ 与 Telegram。',
       field('入站策略', modeSelect),
       h('div', { class: 'grid grid-2' },
         listEditor({
           key: 'white_qq',
-          title: '白名单 QQ 号',
-          subtitle: 'mode=whitelist 时，私聊仅响应这些 QQ 号。',
-          placeholder: '输入 QQ 号后回车，可一次粘贴多个',
+          title: '白名单用户 ID',
+          subtitle: 'mode=whitelist 时，私聊仅响应这些用户。QQ 号是数字；'
+            + 'Telegram 用户 ID 也是数字，可直接粘贴。',
+          placeholder: '输入用户 ID 后回车，可一次粘贴多个',
           getIds: () => data.whitelist?.qq_ids || [],
           setIds: (ids) => { data.whitelist.qq_ids = ids; },
         }),
         listEditor({
           key: 'white_group',
-          title: '白名单群号',
-          subtitle: 'mode=whitelist 时，仅响应这些群。',
-          placeholder: '输入群号后回车，可一次粘贴多个',
+          title: '白名单群/频道 ID',
+          subtitle: 'mode=whitelist 时，仅响应这些群。Telegram 群/频道 ID 是负数，'
+            + '例如 -1001234567890。',
+          placeholder: '输入群 ID 后回车，可一次粘贴多个',
           getIds: () => data.whitelist?.group_ids || [],
           setIds: (ids) => { data.whitelist.group_ids = ids; },
         }),
@@ -200,17 +224,18 @@ export async function render(container, ctx) {
       h('div', { class: 'grid grid-2', style: { marginTop: '16px' } },
         listEditor({
           key: 'black_qq',
-          title: '拉黑的 QQ 号',
-          subtitle: '私聊直接丢弃；群聊中该成员的发言也不触发回复。',
-          placeholder: '输入 QQ 号后回车，可一次粘贴多个',
+          title: '拉黑的用户 ID',
+          subtitle: '私聊直接丢弃；群聊中该成员的发言也不触发回复。'
+            + 'Telegram 用户 ID 同样填在这里。',
+          placeholder: '输入用户 ID 后回车，可一次粘贴多个',
           getIds: () => data.blacklist?.qq_ids || [],
           setIds: (ids) => { data.blacklist.qq_ids = ids; },
         }),
         listEditor({
           key: 'black_group',
-          title: '拉黑的群',
-          subtitle: '该群所有消息一律丢弃。',
-          placeholder: '输入群号后回车，可一次粘贴多个',
+          title: '拉黑的群/频道',
+          subtitle: '该群所有消息一律丢弃。Telegram 群/频道 ID 是负数。',
+          placeholder: '输入群 ID 后回车，可一次粘贴多个',
           getIds: () => data.blacklist?.group_ids || [],
           setIds: (ids) => { data.blacklist.group_ids = ids; },
         }),
