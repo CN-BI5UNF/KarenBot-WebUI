@@ -1325,7 +1325,8 @@ export async function render(container, ctx) {
         h('p', { class: 'field-help' }, frontendLabel),
         table(['项目', '值'], componentRows(components[frontendKey] || {})));
       nodes.push(card('KarenBot 发行版',
-        '统一发行版同时更新后端与当前前端；Pre-release 不会自动提示，可在下方手动选择。',
+        '可同时更新后端与当前前端，也可只更新其中一个组件；'
+        + 'Pre-release 不会自动提示，可在下方手动选择。',
         versions,
         h('div', { class: 'row' },
           h('span', { class: 'field-help' }, '每个版本都可以展开/收起更新日志。'),
