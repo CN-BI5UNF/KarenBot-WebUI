@@ -105,6 +105,16 @@ function notesBlock(release) {
   return box;
 }
 
+const COMPONENT_LABELS = {
+  backend: '后端',
+  gui: 'GUI',
+  webui: 'WebUI',
+};
+
+function componentLabel(key) {
+  return COMPONENT_LABELS[key] || key;
+}
+
 function releaseCard(release, { busy, onApply }) {
   const title = release.name || release.release_tag || release.tag;
   const actionLabel = release.prerelease
@@ -115,14 +125,43 @@ function releaseCard(release, { busy, onApply }) {
   const compat = release.compat || {};
   // 当前正在使用的版本即使没有 manifest，也不在列表里报“不可应用”。
   const blocked = !release.is_current && compat.compatible === false;
-  const action = release.is_current
-    ? h('span', { class: 'badge ok' }, '当前版本')
-    : h('button', {
-      class: 'btn btn-sm btn-primary',
+  const distribution = !!release.distribution;
+  const components = release.components || {};
+  const componentKeys = Object.keys(components);
+  const frontendKey = componentKeys.find((key) => key !== 'backend') || '';
+  let actions;
+  if (distribution && componentKeys.length) {
+    const reinstall = !!release.is_current;
+    const make = (keys, label, primary = false) => h('button', {
+      class: `btn btn-sm${primary ? ' btn-primary' : ''}`,
       disabled: busy || blocked,
       title: blocked ? (compat.message || '目标版本与当前数据不兼容') : '',
-      onclick: () => onApply(release),
-    }, blocked ? '不可自动应用' : actionLabel);
+      onclick: () => onApply(release, keys),
+    }, blocked ? '不可自动应用' : label);
+    actions = h('div', { class: 'row release-actions-row' },
+      make(null, reinstall ? '重新安装全部' : actionLabel, true),
+      componentKeys.includes('backend')
+        ? make(['backend'], reinstall ? '重新安装后端' : '仅更新后端')
+        : null,
+      frontendKey
+        ? make(
+          [frontendKey],
+          reinstall
+            ? `重新安装${componentLabel(frontendKey)}`
+            : `仅更新${componentLabel(frontendKey)}`,
+        )
+        : null);
+  } else {
+    const action = release.is_current
+      ? h('span', { class: 'badge ok' }, '当前版本')
+      : h('button', {
+        class: 'btn btn-sm btn-primary',
+        disabled: busy || blocked,
+        title: blocked ? (compat.message || '目标版本与当前数据不兼容') : '',
+        onclick: () => onApply(release, null),
+      }, blocked ? '不可自动应用' : actionLabel);
+    actions = action;
+  }
   return h('article', { class: 'release-item' },
     h('div', { class: 'release-head' },
       h('div', { class: 'release-title-row' },
@@ -150,7 +189,7 @@ function releaseCard(release, { busy, onApply }) {
       ),
     ),
     notesBlock(release),
-    h('div', { class: 'release-actions' }, action),
+    h('div', { class: 'release-actions' }, actions),
   );
 }
 
@@ -264,7 +303,7 @@ export async function renderReleaseList(
     fill(listHost, ...nodes);
   }
 
-  async function applyRelease(release) {
+  async function applyRelease(release, components = null) {
     if (busy) return;
     if (release.compat && release.compat.compatible === false) {
       setMessage(
@@ -277,7 +316,11 @@ export async function renderReleaseList(
     setMessage('正在检查目标版本…');
     renderList();
     try {
-      const checked = await endpoints.updateCheck({ target_tag: release.tag });
+      const checkPayload = { target_tag: release.tag };
+      if (components && components.length) {
+        checkPayload.components = components;
+      }
+      const checked = await endpoints.updateCheck(checkPayload);
       if (!checked.can_apply) {
         throw new Error(reasonText(checked.reason));
       }
@@ -289,9 +332,16 @@ export async function renderReleaseList(
       const extra = needsExtraConfirm
         ? '\n\n这是回退/切换操作，当前分支会被移动到目标提交；旧 HEAD 会先备份。'
         : '';
-      const train = (checked.distribution_updates || []).length
-        ? '\n\n这是 KarenBot 统一发行版：会同时更新后端和当前前端。'
-        : '';
+      const selected = checked.selected_components || [];
+      let train = '';
+      if ((checked.distribution_updates || []).length) {
+        if (selected.length === 1) {
+          train = `\n\n本次只更新${componentLabel(selected[0])}；`
+            + '另一个组件保持当前版本。';
+        } else {
+          train = '\n\n这是 KarenBot 统一发行版：会同时更新后端和当前前端。';
+        }
+      }
       if (!confirm(
         `确认${verb}到“${checked.target_name || release.name || release.tag}”？\n\n`
         + '更新完成后可选择是否立即重启后端；用户数据目录不会被覆盖。'

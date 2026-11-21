@@ -1071,6 +1071,7 @@ html[data-theme="dark"] .modal-backdrop { background: rgba(0, 0, 0, .6); }
 }
 .release-notes-toggle { margin-top: 6px; }
 .release-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.release-actions-row { justify-content: flex-end; flex-wrap: wrap; }
 .release-message { min-height: 1.2em; margin-top: 8px; }
 .release-message.ok { color: var(--success); }
 .release-message.bad { color: var(--error); }

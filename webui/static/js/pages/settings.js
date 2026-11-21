@@ -1260,7 +1260,7 @@ export async function render(container, ctx) {
       h('label', { class: 'switch' }, notifyInput, h('span', {}, '接收更新提醒')),
       h('p', { class: 'field-help' },
         distributionMode
-          ? '当前使用 KarenBot 统一发行版：每次更新会同时更新后端与当前前端，不能只更新其中一个组件。'
+          ? '当前使用 KarenBot 统一发行版：可同时更新后端与当前前端，也可只更新其中一个组件；单独更新后两端版本可能不一致。'
           : (moduleMode
             ? '后端和当前前端是两个独立组件；下面分别列出各自的版本和 Release。'
             : '应用版本会备份当前提交并重启服务；依赖文件变化时会自动安装，失败则回滚源码。'
@@ -1783,15 +1783,21 @@ export async function render(container, ctx) {
       .filter((item) => item && item.component === 'distribution');
     let groups;
     if (distributionUpdates.length) {
-      groups = distributionUpdates.map((item) =>
-        h('div', { class: 'release-component-result' },
+      groups = distributionUpdates.map((item) => {
+        const selected = item.selected_components || [];
+        return h('div', { class: 'release-component-result' },
           h('p', { class: 'field-help' }, 'KarenBot 统一发行版'),
+          selected.length
+            ? h('p', { class: 'field-help' },
+              `本次更新：${selected.join('、')}`)
+            : null,
           ...Object.entries(item.components || {}).map(([component, meta]) =>
             h('p', {},
               `${component}：${meta.version || meta.tag || '—'}`)),
           item.prerelease
             ? h('p', { class: 'field-help' }, 'Pre-release，极不稳定')
-            : null));
+            : null);
+      });
     } else {
       const updates = (checked.updates || []).filter((item) => item && item.component);
       const grouped = new Map();
