@@ -3,7 +3,7 @@
 KarenBot 的**浏览器前端**模块。仓库已公开，当前版本 **v2.0.0-alpha**（KarenBot 统一发行版）。
 
 > 这是模块源码仓库，不是独立应用。运行前需要 KarenBot 宿主和兼容的
-> `KarenBot-backend`（v0.1.1-alpha.1）。
+> `KarenBot-backend`（v2.0.0-alpha）。
 
 ## 这是什么
 
@@ -91,7 +91,7 @@ python webui_server.py --no-auth # 仅限本机/可信网络
 ## 版本与发布
 
 - 版本标签格式：`vMAJOR.MINOR.PATCH[-dev]`
-- 当前 `v0.1.1-alpha.1` 为预发布开发版，页面与 API 可能调整。
+- 当前 `v2.0.0-alpha` 为预发布开发版，页面与 API 可能调整。
 - Release 自动提供源码归档，并附带模块源码 zip。
 - 与后端模块的兼容关系见上表；后端不兼容升级时前端需要对应升级。
 
