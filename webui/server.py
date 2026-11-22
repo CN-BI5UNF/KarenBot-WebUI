@@ -31,6 +31,7 @@ from backend.auth import (
     load_or_create_token,
 )
 from backend.runtime_host import RuntimeHost
+from backend.webui_access import resolve_webui_host
 from utils.proxy_env import sanitize_no_proxy_env
 
 from . import __version__
@@ -132,22 +133,32 @@ def _port_available(host: str, port: int) -> bool:
 def run_webui(
     project_root: Path,
     *,
-    host: str = "0.0.0.0",
+    host: str | None = None,
     port: int = 8000,
     config_file: Path | None = None,
     token: str | None = None,
     no_auth: bool = False,
     log_level: str = "info",
 ) -> None:
-    """启动 WebUI（阻塞直到 Ctrl+C）。"""
+    """启动 WebUI（阻塞直到 Ctrl+C）。
+
+    ``host`` 为空时读取 ``webui.allow_lan``：关闭只监听 127.0.0.1，开启监听
+    0.0.0.0；显式传入的 ``--host`` 始终优先。
+    """
     import uvicorn
 
-    if not _port_available(host, port):
+    from app_config import AppPaths
+
+    # 只构造路径对象，不创建数据目录/加载配置，保留“端口冲突时不动数据”的行为。
+    paths = AppPaths(project_root=project_root, config_file=config_file)
+    bind_host, bind_source = resolve_webui_host(host, paths.CONFIG_FILE)
+
+    if not _port_available(bind_host, port):
         print(
             f"\n端口 {port} 已被占用，Karen 可能已经在运行。\n"
             f"  查看状态: karen status\n"
             f"  查看日志: karen log\n"
-            f"  换端口启动: python main.py --host {host} --port 9000\n",
+            f"  换端口启动: python main.py --host {bind_host} --port 9000\n",
             file=sys.stderr,
             flush=True,
         )
@@ -177,14 +188,25 @@ def run_webui(
         auth = TokenAuth(value, enabled=True, source=source)
 
     app = create_app(runtime_host, auth)
+    # 设置页据此显示实际监听地址、来源和可访问 URL；CLI --host 覆盖配置时
+    # source 为 "cli"，前端会提示开关不会生效。
+    app.state.bind_host = bind_host
+    app.state.bind_source = bind_source
+    app.state.bind_port = port
+    app.state.bind_urls = lan_urls(bind_host, port)
 
     # flush：输出被重定向到文件/容器日志时，stdout 是块缓冲的，
     # 不主动刷就会让「启动横幅 + 令牌」迟迟不出现。
-    print(format_token_banner(auth, host=host, port=port, urls=lan_urls(host, port)), flush=True)
+    print(
+        format_token_banner(
+            auth, host=bind_host, port=port, urls=app.state.bind_urls
+        ),
+        flush=True,
+    )
 
     config = uvicorn.Config(
         app,
-        host=host,
+        host=bind_host,
         port=port,
         log_level=log_level,
         access_log=False,
@@ -227,7 +249,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="karen-webui", description="KarenBot WebUI 服务"
     )
-    parser.add_argument("--host", default="0.0.0.0", help="监听地址（默认 0.0.0.0，局域网可访问）")
+    parser.add_argument(
+        "--host",
+        default=None,
+        help=(
+            "监听地址；不填时由 config.yaml 的 webui.allow_lan 决定"
+            "（关闭 127.0.0.1，开启 0.0.0.0）。显式填写会覆盖配置"
+        ),
+    )
     parser.add_argument("--port", type=int, default=8000, help="监听端口（默认 8000）")
     parser.add_argument("--config", default="", help="自定义配置文件路径")
     parser.add_argument("--token", default="", help="访问令牌（默认自动生成并记住）")

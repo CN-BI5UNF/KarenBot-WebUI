@@ -1,9 +1,9 @@
 # KarenBot-WebUI
 
-KarenBot 的**浏览器前端**模块。仓库已公开，当前版本 **v2.0.0-alpha**（KarenBot 统一发行版）。
+KarenBot 的**浏览器前端**模块。仓库已公开，当前版本 **v2.0.1-alpha**（KarenBot 统一发行版）。
 
 > 这是模块源码仓库，不是独立应用。运行前需要 KarenBot 宿主和兼容的
-> `KarenBot-backend`（v2.0.0-alpha）。
+> `KarenBot-backend`（v2.0.1-alpha）。
 
 ## 这是什么
 
@@ -24,9 +24,9 @@ API、鉴权、Runtime 生命周期和事件流。这样 WebUI 与原生 GUI 共
 
 | 项目 | 版本 |
 |---|---|
-| 本模块 release | `v2.0.0-alpha`（统一发行版） |
-| 配套后端 | `v2.0.0-alpha` |
-| 配套 GUI | `v2.0.0-alpha` |
+| 本模块 release | `v2.0.1-alpha`（统一发行版） |
+| 配套后端 | `v2.0.1-alpha` |
+| 配套 GUI | `v2.0.1-alpha` |
 | 过渡版 | 前端 `v0.1.1-alpha.2` / 后端 `v0.1.11-alpha.1` |
 
 ## 目录
@@ -62,14 +62,25 @@ cp -a /path/to/KarenBot-WebUI/webui ./webui
 启动方式（使用宿主项目的 `webui_server.py` / `main.py`）：
 
 ```bash
-uv run python main.py            # 默认 0.0.0.0:8000
+uv run python main.py            # 默认 127.0.0.1:8000，仅本机
 uv run python webui_server.py    # 等价入口
 ```
 
-常用参数：
+默认只监听本机回环地址。需要局域网内其它设备访问时，任选一种方式：
+
+1. 在 WebUI 的 **设置 → 网络** 打开“允许暴露在局域网中”，保存后重启 WebUI 服务；
+2. 在 `config.yaml` 设置 `webui.allow_lan: true`；
+3. 启动时显式指定监听地址（会覆盖配置）：
 
 ```bash
-python webui_server.py --host 127.0.0.1 --port 8000
+python main.py --host 0.0.0.0 --port 8000
+python webui_server.py --host 0.0.0.0 --port 8000
+```
+
+其它常用参数：
+
+```bash
+python webui_server.py --port 8000
 python webui_server.py --token 'your-token'
 python webui_server.py --no-auth # 仅限本机/可信网络
 ```
@@ -85,13 +96,15 @@ python webui_server.py --no-auth # 仅限本机/可信网络
 ## 安全边界
 
 - 本仓库只包含前端源码，不包含配置、密钥、聊天记录、日志或数据目录。
-- WebUI 默认需要令牌；`--no-auth` 会让能访问端口的人读取记录和修改配置，只在可信环境使用。
+- WebUI 默认只监听 `127.0.0.1`，且默认需要令牌；开启 `webui.allow_lan` 或传入
+  `--host 0.0.0.0` 后，同一网络内的设备才能访问，仍然需要令牌。
+- `--no-auth` 会让能访问端口的人读取记录和修改配置，只在可信环境使用。
 - 不要把 `webui_token.txt`、`.env` 或代理凭据提交到仓库；`.gitignore` 已覆盖常见敏感文件。
 
 ## 版本与发布
 
 - 版本标签格式：`vMAJOR.MINOR.PATCH[-dev]`
-- 当前 `v2.0.0-alpha` 为预发布开发版，页面与 API 可能调整。
+- 当前 `v2.0.1-alpha` 为预发布开发版，页面与 API 可能调整。
 - Release 自动提供源码归档，并附带模块源码 zip。
 - 与后端模块的兼容关系见上表；后端不兼容升级时前端需要对应升级。
 

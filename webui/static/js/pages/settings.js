@@ -59,6 +59,7 @@ export async function render(container, ctx) {
   const groups = payload.groups || [];
   const pathsInfo = payload.paths || {};
   let restartHint = null;
+  let webuiRestartHint = null;
   // 设置页全屏显示，返回目标是进入设置前的页面（直链进入时为总览）。
   const backTarget = ctx.previous && ctx.previous !== 'settings'
     ? ctx.previous : 'overview';
@@ -148,11 +149,39 @@ export async function render(container, ctx) {
         }, '立即重启 Runtime'),
       ),
     );
-    fill(hintHost, restartHint);
+    fill(hintHost, restartHint, webuiRestartHint);
+  }
+
+  function markWebuiRestart() {
+    if (webuiRestartHint) return;
+    webuiRestartHint = card(null, '',
+      h('div', { class: 'row' },
+        h('span', {},
+          '监听地址已保存；需要重启 WebUI 服务才能生效，重启期间本页会短暂断开。'),
+        h('div', { class: 'spacer' }),
+        h('button', {
+          class: 'btn btn-primary',
+          onclick: async (event) => {
+            event.currentTarget.disabled = true;
+            try {
+              await promptBackendRestart(ctx, {
+                title: '重启 WebUI 服务？',
+                message: '重启后会按新的监听设置启动；本页会自动刷新。',
+                confirmLabel: '立即重启 WebUI',
+              });
+            } finally {
+              if (event.currentTarget) event.currentTarget.disabled = false;
+            }
+          },
+        }, '立即重启 WebUI'),
+      ),
+    );
+    fill(hintHost, restartHint, webuiRestartHint);
   }
 
   function clearRestart() {
     restartHint = null;
+    webuiRestartHint = null;
     fill(hintHost);
   }
 
@@ -326,7 +355,11 @@ export async function render(container, ctx) {
           `${fieldSpec.label}：${result.message || '已保存；需要重启 Runtime 才生效'}`,
           'ok',
         );
-        markRestart();
+        if (result.restart_scope === 'webui') {
+          markWebuiRestart();
+        } else {
+          markRestart();
+        }
       } else {
         ctx.toast(
           `${fieldSpec.label}：${result.message || '已保存并立即生效'}`,
@@ -1865,6 +1898,42 @@ export async function render(container, ctx) {
     show(nextKey);
   }
 
+  function appendNetworkInfo(nodes) {
+    const info = payload.webui || {};
+    const bindHost = String(info.bind_host || '');
+    const bindPort = info.bind_port ? String(info.bind_port) : '';
+    const source = String(info.bind_source || '');
+    const sourceText = source === 'cli'
+      ? '启动参数 --host'
+      : (source === 'config' ? 'config.yaml' : '默认值');
+    const urls = Array.isArray(info.urls) ? info.urls : [];
+    nodes.push(card('当前监听',
+      '这里显示的是本进程实际使用的监听地址；保存开关后需要重启 WebUI 服务才会改变。',
+      h('table', { class: 'table' },
+        h('tbody', {},
+          h('tr', {}, h('td', {}, '监听地址'),
+            h('td', { class: 'mono' },
+              bindHost ? `${bindHost}${bindPort ? `:${bindPort}` : ''}` : '—')),
+          h('tr', {}, h('td', {}, '来源'), h('td', {}, sourceText)))),
+      urls.length
+        ? h('div', {},
+          h('p', { class: 'field-help' }, '可访问地址：'),
+          h('div', { class: 'chips' },
+            ...urls.map((url) => h('span', { class: 'chip mono' }, url))))
+        : null,
+      bindHost === '0.0.0.0'
+        ? h('p', { class: 'field-help' },
+          '局域网内设备可以通过上面的地址访问，仍然需要访问令牌。'
+          + '关闭开关并重启后，除本机外的设备会立即失去访问。')
+        : h('p', { class: 'field-help' }, '当前只允许本机访问。'),
+      source === 'cli'
+        ? h('p', { class: 'field-help' },
+          '启动命令显式指定了 --host，会覆盖“允许暴露在局域网中”开关；'
+          + '要让开关生效，请从启动命令中去掉 --host。')
+        : null,
+    ));
+  }
+
   async function show(key) {
     activeKey = key;
     // 每个分页使用独立的 body 节点。慢请求返回时若用户已切走，
@@ -1931,6 +2000,9 @@ export async function render(container, ctx) {
         section.append(control(spec, (value) => saveField(spec, value)));
       }
       nodes.push(section);
+    }
+    if (key === 'network') {
+      appendNetworkInfo(nodes);
     }
     if (key === 'features') {
       await appendVisionPanel(nodes, group);

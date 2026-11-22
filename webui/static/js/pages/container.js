@@ -22,6 +22,8 @@ export async function render(container, ctx) {
   let storageSetup = null;
   let agentStatus = null;
   let agentLoading = true;
+  let settingsPayload = null;
+  let settingsLoading = true;
   let agentBusy = false;
   let lastError = null;
   let destroyed = false;
@@ -65,12 +67,22 @@ export async function render(container, ctx) {
   async function refresh() {
     refreshButton.disabled = true;
     agentLoading = true;
+    settingsLoading = true;
     // 三个接口都依赖 Docker 但互相独立，串行等待会让 Agent 卡片明显变慢。
     const agentsPromise = endpoints.containerAgents()
       .then((data) => { agentStatus = data; })
       .catch(() => { agentStatus = null; })
       .finally(() => {
         agentLoading = false;
+        if (!destroyed) renderAgents();
+      });
+    // 工具档位已移到本卡片；字段声明仍由 /api/settings 提供，避免在
+    // 两个前端里重复维护选项和说明。
+    const settingsPromise = endpoints.settings()
+      .then((data) => { settingsPayload = data; })
+      .catch(() => { settingsPayload = null; })
+      .finally(() => {
+        settingsLoading = false;
         if (!destroyed) renderAgents();
       });
     try {
@@ -92,7 +104,10 @@ export async function render(container, ctx) {
           empty(`读取容器状态失败：${e.message}`)));
       }
     } finally {
-      await agentsPromise.catch(() => {});
+      await Promise.all([
+        agentsPromise.catch(() => {}),
+        settingsPromise.catch(() => {}),
+      ]);
       refreshButton.disabled = false;
     }
   }
@@ -192,15 +207,79 @@ export async function render(container, ctx) {
     }
   }
 
+  function toolProfileSpec() {
+    for (const group of settingsPayload?.groups || []) {
+      const found = (group.fields || []).find(
+        (item) => item.path === 'behavior.tool_schema_profile',
+      );
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function buildToolProfileSection() {
+    const title = h('h3', { style: { marginTop: '18px' } }, '工具档位');
+    const spec = toolProfileSpec();
+    if (!spec) {
+      return h('div', {}, title,
+        h('p', { class: 'field-help' },
+          settingsLoading
+            ? '正在读取工具档位…'
+            : '工具档位暂不可用；请确认后端已更新。'));
+    }
+    let saved = String(spec.value || spec.default || 'compact');
+    const select = h('select', {});
+    for (const [value, label] of spec.options || []) {
+      select.append(h('option', { value, selected: value === saved }, label));
+    }
+    const detail = h('p', { class: 'field-help' },
+      (spec.option_help && spec.option_help[saved]) || spec.help || '');
+    const updateDetail = (value) => {
+      detail.textContent = (spec.option_help && spec.option_help[value])
+        || spec.help || '';
+    };
+    select.addEventListener('change', async () => {
+      const next = select.value;
+      select.disabled = true;
+      try {
+        const result = await endpoints.patchSetting(
+          'behavior.tool_schema_profile', next,
+        );
+        saved = String(result.value || next);
+        spec.value = saved;
+        updateDetail(saved);
+        ctx.toast(
+          `工具档位已切换为 ${saved}`,
+          result.needs_restart ? 'warn' : 'ok',
+        );
+      } catch (e) {
+        select.value = saved;
+        ctx.toast(`工具档位保存失败：${e.message}`, 'error');
+      } finally {
+        select.disabled = false;
+      }
+    });
+    return h('div', {},
+      title,
+      h('div', { class: 'row row-wrap' },
+        h('label', { class: 'field' },
+          h('span', { class: 'field-label' }, spec.label || '工具 schema 档位'),
+          select),
+        h('span', { class: 'field-help' }, spec.help || '')),
+      detail);
+  }
+
   function renderAgents() {
     if (agentLoading) {
       fill(agentHost, card('Agent 模式', '',
-        empty('正在读取 Agent 模式…')));
+        empty('正在读取 Agent 模式…'),
+        buildToolProfileSection()));
       return;
     }
     if (!agentStatus) {
       fill(agentHost, card('Agent 模式', '',
-        empty('Agent 模式状态不可用；请先启动 Runtime 与容器。')));
+        empty('Agent 模式状态不可用；请先启动 Runtime 与容器。'),
+        buildToolProfileSection()));
       return;
     }
     const modes = agentStatus.agents || [];
@@ -297,9 +376,8 @@ export async function render(container, ctx) {
       ),
       h('div', { class: 'field-help', style: { marginTop: '12px' } },
         '安装只写入 /workspace/.karen-agents，不会重建容器或删除 /workspace 文件。'
-        + '原生工具不需要外部 CLI 或额外依赖。'
-        + '建议在 设置 → 软件行为 → 工具 schema 档位 选择 agent，获得核心工具常加载 + '
-        + 'ToolSearch 延迟加载。'),
+        + '原生工具不需要外部 CLI 或额外依赖。'),
+      buildToolProfileSection(),
       h('h3', { style: { marginTop: '18px' } }, '本机 Agent 限制'),
       h('div', { class: 'row row-wrap' },
         h('label', { class: 'field' },
