@@ -289,9 +289,5 @@ export async function render(container, ctx) {
     ),
   );
 
-  window.addEventListener('beforeunload', (event) => {
-    if (dirty) event.preventDefault();
-  });
-
-  return {};
+  return { isDirty: () => dirty };
 }

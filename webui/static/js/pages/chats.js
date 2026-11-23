@@ -84,7 +84,10 @@ function missingAttachmentNode(att, message = '') {
 }
 
 function attachmentCanOpenInBrowser(att) {
-  const mime = String(att.mime || '').toLowerCase();
+  const mime = String(att.mime || '').toLowerCase().split(';', 1)[0].trim();
+  const name = attachmentName(att).toLowerCase().split(/[?#]/, 1)[0];
+  if (mime === 'text/html' || mime === 'image/svg+xml'
+      || /\.(?:html?|svg)$/.test(name)) return false;
   return att.kind === 'image'
     || att.kind === 'video'
     || att.kind === 'audio'
@@ -111,12 +114,14 @@ function openImagePreview(att) {
         href: attachmentDownloadUrl(att),
         download: name,
       }, icon('download', { size: 16 }), '下载'),
-      h('a', {
-        class: 'btn btn-primary',
-        href: attachmentInlineUrl(att),
-        target: '_blank',
-        rel: 'noopener',
-      }, '在浏览器打开'),
+      attachmentCanOpenInBrowser(att)
+        ? h('a', {
+          class: 'btn btn-primary',
+          href: attachmentInlineUrl(att),
+          target: '_blank',
+          rel: 'noopener',
+        }, '在浏览器打开')
+        : null,
     ],
     wide: true,
   });
@@ -837,6 +842,10 @@ export async function render(container, ctx) {
   // 实时：新消息到达时重新拉一次当前会话
   // ============================================================
 
+  await loadConversations();
+  const first = state.conversations.find((c) => !c.key.startsWith('system:'));
+  if (first) await selectConversation(first.key);
+
   const unsubscribe = ctx.onEvent(async (event) => {
     if (event.type !== 'chat') return;
     const msg = event.data;
@@ -849,10 +858,6 @@ export async function render(container, ctx) {
     await loadItems({ stickBottom: stick });
     await loadConversations();
   });
-
-  await loadConversations();
-  const first = state.conversations.find((c) => !c.key.startsWith('system:'));
-  if (first) await selectConversation(first.key);
 
   return {
     destroy() {

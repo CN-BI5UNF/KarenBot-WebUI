@@ -6,6 +6,7 @@ import { endpoints } from '../api.js';
 
 const LEVELS = [['', '全部'], ['DEBUG', '调试以上'], ['INFO', '信息以上'],
                 ['WARNING', '留意以上'], ['ERROR', '出错']];
+const LEVEL_WEIGHT = { DEBUG: 10, INFO: 20, WARNING: 30, WARN: 30, ERROR: 40, CRITICAL: 50 };
 const MAX_LINES = 2000;
 
 export async function render(container, ctx) {
@@ -49,6 +50,9 @@ export async function render(container, ctx) {
   pauseBox.addEventListener('change', () => { paused = pauseBox.checked; });
 
   function matches(record) {
+    const minimumLevel = LEVEL_WEIGHT[level];
+    const recordLevel = LEVEL_WEIGHT[String(record.level || '').toUpperCase()];
+    if (minimumLevel && recordLevel && recordLevel < minimumLevel) return false;
     if (module && !String(record.logger || '').toLowerCase().includes(module.toLowerCase())) {
       return false;
     }

@@ -98,7 +98,7 @@ export const endpoints = {
   logout: () => api.post('/api/auth/logout'),
 
   status: () => api.get('/api/status'),
-  restart: () => api.post('/api/system/restart'),
+  restart: () => api.post('/api/system/restart', {}, { timeoutMs: 120000 }),
   restartBackend: () => api.post('/api/system/restart-backend', {}, { timeoutMs: 15000 }),
   slangList: (params = {}) => {
     const query = new URLSearchParams();
@@ -178,7 +178,8 @@ export const endpoints = {
   rag: (limit = 200) => api.get(`/api/memory/rag?limit=${limit}`),
 
   mindState: () => api.get('/api/mind/state'),
-  mindTab: (key, limit = 50) => api.get(`/api/mind/tab/${key}?limit=${limit}`),
+  mindTab: (key, limit = 50) =>
+    api.get(`/api/mind/tab/${encodeURIComponent(key)}?limit=${limit}`),
   // 唤醒对白需要一次模型调用，默认 15 秒不够。
   wakePersona: (payload) => api.post('/api/mind/wake', payload, { timeoutMs: 120000 }),
 
@@ -223,11 +224,14 @@ export const endpoints = {
     ),
   deletePersonaAppearance: (name) =>
     api.del(`/api/personas/${encodeURIComponent(name)}/appearance`),
-  importPersona: (formData) => api.upload('/api/personas/import', formData),
+  importPersona: (formData) =>
+    api.upload('/api/personas/import', formData, { timeoutMs: 120000 }),
 
   // 人格生成 / 改写 / 复制
-  personaDraft: (brief) => api.post('/api/personas/draft', brief),
-  personaRefine: (payload) => api.post('/api/personas/refine', payload),
+  personaDraft: (brief) =>
+    api.post('/api/personas/draft', brief, { timeoutMs: 300000 }),
+  personaRefine: (payload) =>
+    api.post('/api/personas/refine', payload, { timeoutMs: 300000 }),
   savePersona: (payload) => api.post('/api/personas', payload),
   personaSource: (name) => api.get(`/api/personas/${encodeURIComponent(name)}/source`),
   personaBrief: () => api.get('/api/personas/brief'),
@@ -237,7 +241,8 @@ export const endpoints = {
 
   emoji: () => api.get('/api/emoji'),
   emojiNames: () => api.get('/api/emoji/names'),
-  uploadEmoji: (formData) => api.upload('/api/emoji/upload', formData),
+  uploadEmoji: (formData) =>
+    api.upload('/api/emoji/upload', formData, { timeoutMs: 120000 }),
   renameEmoji: (name, newName) =>
     api.patch(`/api/emoji/${encodeURIComponent(name)}`, { new_name: newName }),
   deleteEmoji: (name) => api.del(`/api/emoji/${encodeURIComponent(name)}`),
@@ -248,7 +253,9 @@ export const endpoints = {
   installModelDeps: (name, source) =>
     api.post(`/api/models/${encodeURIComponent(name)}/install-deps`, { source }),
   uploadModel: (name, formData) =>
-    api.upload(`/api/models/${encodeURIComponent(name)}/upload`, formData),
+    api.upload(`/api/models/${encodeURIComponent(name)}/upload`, formData, {
+      timeoutMs: 600000,
+    }),
 
   workspaceFiles: (path = '/') =>
     api.get(`/api/workspace/files?path=${encodeURIComponent(path)}`, {
@@ -306,7 +313,8 @@ export const endpoints = {
   probeSearch: (payload) =>
     api.post('/api/settings/web-search/probe', payload, { timeoutMs: 30000 }),
   providers: () => api.get('/api/settings/providers'),
-  patchAgent: (name, payload) => api.patch(`/api/settings/agents/${name}`, payload),
+  patchAgent: (name, payload) =>
+    api.patch(`/api/settings/agents/${encodeURIComponent(name)}`, payload),
   putSecret: (keyId, value) => api.put('/api/settings/secrets', { key_id: keyId, value }),
 
   // 提供商增删改（写操作走 /api/providers，settings 那条只读）
@@ -316,12 +324,14 @@ export const endpoints = {
     api.patch(`/api/providers/${encodeURIComponent(id)}`, payload),
   deleteProvider: (id, dropKey = false) =>
     api.del(`/api/providers/${encodeURIComponent(id)}?drop_key=${dropKey ? 'true' : 'false'}`),
-  testProvider: (id) => api.post(`/api/providers/${encodeURIComponent(id)}/test`),
-  testProviderConfig: (payload) => api.post('/api/providers/test', payload),
+  testProvider: (id) =>
+    api.post(`/api/providers/${encodeURIComponent(id)}/test`, {}, { timeoutMs: 120000 }),
+  testProviderConfig: (payload) =>
+    api.post('/api/providers/test', payload, { timeoutMs: 120000 }),
   fetchProviderModels: (payload) =>
-    api.post('/api/providers/fetch-models', payload, { timeoutMs: 30000 }),
+    api.post('/api/providers/fetch-models', payload, { timeoutMs: 120000 }),
   fetchProviderModelsById: (id) =>
-    api.post(`/api/providers/${encodeURIComponent(id)}/fetch-models`, {}, { timeoutMs: 30000 }),
+    api.post(`/api/providers/${encodeURIComponent(id)}/fetch-models`, {}, { timeoutMs: 120000 }),
 
   accessLists: () => api.get('/api/settings/lists'),
   saveAccessLists: (payload) => api.put('/api/settings/lists', payload),

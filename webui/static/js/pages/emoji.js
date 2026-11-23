@@ -315,7 +315,6 @@ export async function render(container, ctx) {
   }
 
   await load();
-  ctx.onEvent(() => {}); // 表情包不依赖实时事件，占位保持接口一致
 
   return {
     destroy() {

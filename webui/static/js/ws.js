@@ -27,6 +27,18 @@ export class EventStream {
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     const url = `${scheme}://${location.host}/ws/events`;
 
+    const previous = this.socket;
+    this.socket = null;
+    if (this.connected) this.onConnectionChange(false);
+    this.connected = false;
+    if (previous) {
+      previous.onopen = null;
+      previous.onmessage = null;
+      previous.onclose = null;
+      previous.onerror = null;
+      previous.close();
+    }
+
     let socket;
     try {
       socket = new WebSocket(url);
@@ -37,12 +49,14 @@ export class EventStream {
     this.socket = socket;
 
     socket.onopen = () => {
+      if (this.socket !== socket) return;
       this.connected = true;
       this.backoff = 1000;
       this.onConnectionChange(true);
     };
 
     socket.onmessage = (event) => {
+      if (this.socket !== socket) return;
       let payload;
       try {
         payload = JSON.parse(event.data);
@@ -59,6 +73,8 @@ export class EventStream {
     };
 
     socket.onclose = (event) => {
+      if (this.socket !== socket) return;
+      this.socket = null;
       this.connected = false;
       this.onConnectionChange(false);
       if (event.code === UNAUTHORIZED_CLOSE_CODE) {
@@ -70,6 +86,7 @@ export class EventStream {
     };
 
     socket.onerror = () => {
+      if (this.socket !== socket) return;
       // onclose 紧随其后，重连逻辑统一放在那里。
       socket.close();
     };
@@ -97,9 +114,16 @@ export class EventStream {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
-    if (this.socket) {
-      this.socket.close();
-      this.socket = null;
+    const socket = this.socket;
+    this.socket = null;
+    if (socket) {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onclose = null;
+      socket.onerror = null;
+      socket.close();
     }
+    if (this.connected) this.onConnectionChange(false);
+    this.connected = false;
   }
 }
