@@ -466,12 +466,110 @@ test('selective restore shows sizes, requires preview phrase and polls the resto
     restorePayload = payload;
     return { id: 'restore-1', state: 'queued', operation: 'restore', rollback_filename: 'rollback.zip' };
   };
-  endpoints.backupRestoreJob = async () => ({ id: 'restore-1', state: 'done', operation: 'restore', rollback_filename: 'rollback.zip' });
+  endpoints.backupRestoreJob = async () => ({ id: 'restore-1', state: 'done', operation: 'restore', rollback_filename: 'rollback.zip',
+    component_progress: { config: { bytes: 100, files: 1 }, chats: { bytes: 1000, files: 2 } } });
   await restore.fire('click');
   assert.deepEqual(restorePayload, {
     filename: 'full.zip', components: ['config', 'chats'], confirmation: '恢复备份',
   });
+  await settle();
+  await settle();
   assert(host.textContent.includes('rollback.zip'));
+  assert(host.textContent.includes('恢复完成；回滚备份：rollback.zip'));
+  const progressTable = find(host, (node) => node.tagName === 'table' && node.textContent.includes('预计大小'));
+  assert(progressTable, 'completed restore retains per-category usage after refreshing status');
+  const chatRow = find(progressTable, (node) => node.tagName === 'tr' && node.textContent.includes('聊天记录'));
+  assert.equal(chatRow.textContent, '聊天记录1000 B1000 B1000 B');
+});
+
+async function readyToRestore(host) {
+  await openRestoreSelection(host, ['full.zip']);
+  endpoints.backupRestorePreview = async ({ filename, components }) => ({
+    ok: true, filename, confirmation_phrase: '恢复备份',
+    components: components.map((id) => ({ id, label: id, archive_bytes: 100, target_bytes: 50 })),
+    total_archive_bytes: 200, total_target_bytes: 100, warnings: [],
+  });
+  await button(host, '预览所选恢复内容').fire('click');
+  const confirmation = find(host, (node) => node.tagName === 'input' && node.type === 'text');
+  confirmation.value = '恢复备份';
+  await confirmation.fire('input');
+}
+
+test('restore submission and execution block backup creation across edits and refreshes', async () => {
+  const host = await backupSettings();
+  await readyToRestore(host);
+  const submitGate = deferred();
+  const jobGate = deferred();
+  endpoints.backupRestore = async () => submitGate.promise;
+  endpoints.backupRestoreJob = async () => jobGate.promise;
+  let backupCalls = 0;
+  endpoints.backupStart = async () => { backupCalls++; throw new Error('must stay blocked'); };
+  const pending = button(host, '立即恢复').fire('click');
+  assert.equal(button(host, '立即备份').disabled, true);
+  const workspace = find(host, (node) => node.tagName === 'label' && node.textContent.startsWith('工作区'));
+  const workspaceCheckbox = checkbox(workspace);
+  workspaceCheckbox.checked = false;
+  await workspaceCheckbox.fire('change');
+  await button(host, '刷新').fire('click');
+  assert.equal(button(host, '立即备份').disabled, true);
+  await button(host, '立即备份').fire('click');
+  assert.equal(backupCalls, 0);
+
+  submitGate.resolve({ id: 'restore-pending', state: 'queued', operation: 'restore' });
+  await pending;
+  await button(host, '刷新').fire('click');
+  assert.equal(button(host, '立即备份').disabled, true);
+  jobGate.resolve({ id: 'restore-pending', state: 'done', operation: 'restore', rollback_filename: 'saved.zip' });
+  await settle();
+  await settle();
+  assert.equal(button(host, '立即备份').disabled, false);
+  assert(host.textContent.includes('恢复完成；回滚备份：saved.zip'));
+});
+
+test('backup submission cannot be duplicated and blocks an already previewed restore', async () => {
+  const host = await backupSettings();
+  await readyToRestore(host);
+  const submitGate = deferred();
+  const jobGate = deferred();
+  let calls = 0;
+  endpoints.backupStart = async () => { calls++; return submitGate.promise; };
+  endpoints.backupJob = async () => jobGate.promise;
+  const pending = button(host, '立即备份').fire('click');
+  const workspace = find(host, (node) => node.tagName === 'label' && node.textContent.startsWith('工作区'));
+  const workspaceCheckbox = checkbox(workspace);
+  workspaceCheckbox.checked = false;
+  await workspaceCheckbox.fire('change');
+  await button(host, '刷新').fire('click');
+  assert.equal(button(host, '立即备份').disabled, true);
+  assert.equal(button(host, '立即恢复').disabled, true);
+  await button(host, '立即备份').fire('click');
+  assert.equal(calls, 1);
+  submitGate.resolve({ id: 'backup-pending', state: 'running', operation: 'backup' });
+  await pending;
+  jobGate.resolve({ id: 'backup-pending', state: 'done', operation: 'backup' });
+  await settle();
+  await settle();
+  assert.equal(button(host, '立即备份').disabled, false);
+});
+
+test('status-discovered active restore uses restore polling and locks conflicting operations', async () => {
+  const host = await backupSettings();
+  const jobGate = deferred();
+  let activeRestore = { id: 'discovered', state: 'running', operation: 'restore', stage: 'restoring',
+    total_bytes: 1234, progress: 600, component_progress: { config: { bytes: 600, files: 1 } } };
+  endpoints.backupStatus = async () => ({ directory: '/tmp/backups', files: [], jobs: [], active_restore: activeRestore });
+  let polled;
+  endpoints.backupRestoreJob = async (id) => { polled = id; return jobGate.promise; };
+  await button(host, '刷新').fire('click');
+  assert.equal(polled, 'discovered');
+  assert.equal(button(host, '立即备份').disabled, true);
+  assert(host.textContent.includes('恢复文件'));
+  activeRestore = null;
+  jobGate.resolve({ id: 'discovered', state: 'done', operation: 'restore', rollback_filename: 'discovered-backup.zip' });
+  await settle();
+  await settle();
+  assert.equal(button(host, '立即备份').disabled, false);
+  assert(host.textContent.includes('discovered-backup.zip'));
 });
 
 test('restore preview is discarded when categories change while the request is pending', async () => {

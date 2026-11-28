@@ -1589,6 +1589,9 @@ export async function render(container, ctx) {
     writing: '写入压缩包',
     verifying: '验证压缩包',
     hashing: '计算校验值',
+    rollback_snapshot: '创建回滚备份',
+    restoring: '恢复文件',
+    restarting: '重启 Runtime',
     cancelling: '收尾中',
     cancelled: '已取消',
     interrupted: '已中断',
@@ -1633,7 +1636,12 @@ export async function render(container, ctx) {
     let restorePreview = null;
     let restoreFormRevision = 0;
     let restoreBusy = false;
+    let restoreSubmitting = false;
+    let backupSubmitting = false;
     let activeBackupJob = null;
+    let lastProgressJob = null;
+    let restoreProgressPreview = null;
+    let syncRestoreControls = () => {};
     const restoreJobStorageKey = 'karenbot.pending-backup-restore';
     const readPendingRestoreId = () => {
       try { return globalThis.localStorage?.getItem(restoreJobStorageKey) || ''; }
@@ -1647,6 +1655,7 @@ export async function render(container, ctx) {
     };
     let pendingRestoreJobId = readPendingRestoreId();
     let pollTimer = null;
+    let pollRequestActive = false;
     const statusLine = h('p', { class: 'field-help' });
     const progressHost = h('div', {});
     const filesHost = h('div', {});
@@ -1689,22 +1698,33 @@ export async function render(container, ctx) {
       return Number(item.bytes ?? item.estimated_bytes ?? 0);
     }
 
+    function operationBusy() {
+      return restoreBusy || restoreSubmitting || backupSubmitting
+        || Boolean(pendingRestoreJobId) || Boolean(activeBackupJob)
+        || (status.jobs || []).some((job) => ['running', 'queued', 'cancelling'].includes(job.state));
+    }
+
     function syncBackupStart() {
       const selected = componentInventory.filter((item) => selectedComponents.has(item.id));
+      const busy = operationBusy();
       startBtn.disabled = selected.length === 0 || selected.some((item) => item.available === false)
-        || Boolean(activeBackupJob)
-        || (status.jobs || []).some((job) => ['running', 'queued', 'cancelling'].includes(job.state));
-      mediaToggle.disabled = !selectedComponents.has('workspace')
-        || Boolean(activeBackupJob)
-        || (status.jobs || []).some((job) => ['running', 'queued', 'cancelling'].includes(job.state));
+        || busy;
+      mediaToggle.disabled = !selectedComponents.has('workspace') || busy;
+      syncRestoreControls();
     }
 
     function renderProgress(job) {
       if (!job) {
-        fill(progressHost);
-        syncBackupStart();
-        return;
+        // Keep the completed result visible after refreshing the file list.
+        if (lastProgressJob) job = lastProgressJob;
+        else {
+          fill(progressHost);
+          syncBackupStart();
+          return;
+        }
       }
+      const previousJob = lastProgressJob;
+      lastProgressJob = job;
       const total = Number(job.total_bytes || 0);
       const done = Number(job.processed_bytes ?? job.progress ?? 0);
       const pct = total > 0 ? Math.max(0, Math.min(100, Math.round(done / total * 100))) : 0;
@@ -1714,10 +1734,6 @@ export async function render(container, ctx) {
       if (job.operation !== 'restore') activeBackupJob = running ? job : null;
       if (job.operation === 'restore') {
         restoreBusy = running;
-        if (!running && restoreSelection) {
-          restorePreview = null;
-          renderRestoreSelection();
-        }
       }
       const line = running
         ? `${stateText} · ${stageText}`
@@ -1728,7 +1744,7 @@ export async function render(container, ctx) {
         ? job.components
         : Object.entries(job.component_progress || {}).map(([id, item]) => {
           const previewItem = job.operation === 'restore'
-            ? restorePreview?.components?.find((entry) => entry.id === id) : null;
+            ? (restoreProgressPreview || restorePreview)?.components?.find((entry) => entry.id === id) : null;
           return {
             id,
             label: previewItem?.label || componentInventory.find((entry) => entry.id === id)?.label || id,
@@ -1787,8 +1803,12 @@ export async function render(container, ctx) {
             `${job.error.code}: ${job.error.message}`)
           : null,
       );
-      startBtn.disabled = running;
-      if (job.operation !== 'restore') syncBackupStart();
+      if (job.operation === 'restore' && !running && restoreSelection
+        && (previousJob?.id !== job.id || !BACKUP_TERMINAL_STATES.has(previousJob?.state))) {
+        restorePreview = null;
+        renderRestoreSelection();
+      }
+      syncBackupStart();
       if (job.state === 'done') {
         statusLine.textContent = job.operation === 'restore'
           ? `恢复完成${job.rollback_filename ? `；回滚备份：${job.rollback_filename}` : ''}`
@@ -1860,12 +1880,14 @@ export async function render(container, ctx) {
     function renderRestoreSelection() {
       const formRevision = ++restoreFormRevision;
       if (!restoreSelection) {
+        syncRestoreControls = () => {};
         fill(restoreHost);
         return;
       }
       const selection = restoreSelection;
       const { filename, report, selected } = selection;
       let previewRevision = 0;
+      let previewPending = false;
       let previewedComponents = null;
       // A late preview must never authorize a newer form or changed selection.
       const currentForm = () => formRevision === restoreFormRevision
@@ -1885,11 +1907,15 @@ export async function render(container, ctx) {
 
       const syncConfirmation = () => {
         const required = restorePreview?.confirmation_phrase || '';
-        restoreBtn.disabled = restoreBusy || !currentPreview()
+        restoreBtn.disabled = operationBusy() || !currentPreview()
           || !required || confirmInput.value.trim() !== required;
+        previewBtn.disabled = operationBusy() || previewPending;
+        confirmInput.disabled = operationBusy();
       };
+      syncRestoreControls = syncConfirmation;
       confirmInput.addEventListener('input', syncConfirmation);
       previewBtn.addEventListener('click', async () => {
+        if (operationBusy() || previewPending) return;
         if (!selected.size) {
           localStatus.textContent = '至少选择一类要恢复的内容。';
           return;
@@ -1900,7 +1926,8 @@ export async function render(container, ctx) {
         previewedComponents = null;
         confirmInput.value = '';
         syncConfirmation();
-        previewBtn.disabled = true;
+        previewPending = true;
+        syncConfirmation();
         localStatus.textContent = '正在检查备份并计算覆盖范围…';
         try {
           const preview = await endpoints.backupRestorePreview({
@@ -1943,7 +1970,8 @@ export async function render(container, ctx) {
           syncConfirmation();
           localStatus.textContent = `恢复预览失败：${e.message}`;
         } finally {
-          previewBtn.disabled = false;
+          previewPending = false;
+          syncConfirmation();
         }
       });
       restoreBtn.addEventListener('click', async () => {
@@ -1953,7 +1981,10 @@ export async function render(container, ctx) {
           components: [...previewedComponents],
           confirmation: restorePreview.confirmation_phrase,
         };
+        restoreProgressPreview = restorePreview;
+        restoreSubmitting = true;
         restoreBusy = true;
+        syncBackupStart();
         previewBtn.disabled = true;
         restoreBtn.disabled = true;
         confirmInput.disabled = true;
@@ -1972,6 +2003,7 @@ export async function render(container, ctx) {
         } catch (e) {
           localStatus.textContent = `恢复启动失败：${e.message}`;
         } finally {
+          restoreSubmitting = false;
           if (!restoreJobStarted) {
             restoreBusy = false;
             confirmInput.disabled = false;
@@ -1979,6 +2011,7 @@ export async function render(container, ctx) {
             for (const checkbox of choiceHost.querySelectorAll('input')) checkbox.disabled = false;
             syncConfirmation();
           }
+          syncBackupStart();
         }
       });
 
@@ -2041,7 +2074,7 @@ export async function render(container, ctx) {
             }
           });
           restoreBtn.addEventListener('click', async () => {
-            if (restoreBusy) return;
+            if (operationBusy()) return;
             restoreBtn.disabled = true;
             // Invalidate the old form before verifying the newly chosen file.
             restoreSelection = null;
@@ -2099,13 +2132,15 @@ export async function render(container, ctx) {
     }
 
     function renderSummary() {
-      const active = (status.jobs || []).find(
+      const active = status.active_restore || (status.jobs || []).find(
         (job) => ['running', 'queued', 'cancelling'].includes(job.state),
       ) || null;
       if (active?.operation === 'restore') {
         restoreBusy = true;
+        pendingRestoreJobId = active.id;
+        setPendingRestoreId(active.id);
         renderBackupChoices();
-      } else if (active?.operation !== 'restore') {
+      } else if (!pendingRestoreJobId && !restoreSubmitting) {
         restoreBusy = false;
       }
       activeBackupJob = active?.operation === 'restore' ? null : active;
@@ -2124,9 +2159,11 @@ export async function render(container, ctx) {
       ]));
       syncBackupStart();
       renderFiles();
-      renderProgress(active);
-      if (active && !pollTimer) pollJob(active.id, active.operation === 'restore' ? 'restore' : 'backup');
-      else if (!active && pendingRestoreJobId && !pollTimer) pollJob(pendingRestoreJobId, 'restore');
+      if (active?.operation === 'restore' || !pendingRestoreJobId) renderProgress(active);
+      if (!pollTimer && !pollRequestActive) {
+        if (pendingRestoreJobId) pollJob(pendingRestoreJobId, 'restore');
+        else if (active) pollJob(active.id);
+      }
     }
 
     async function refreshStatus() {
@@ -2139,8 +2176,10 @@ export async function render(container, ctx) {
     }
 
     async function pollJob(jobId, operation = 'backup') {
+      if (pollRequestActive) return;
       clearPoll();
       if (startBtn.isConnected === false) return;
+      pollRequestActive = true;
       try {
         const job = operation === 'restore'
           ? await endpoints.backupRestoreJob(jobId)
@@ -2158,21 +2197,27 @@ export async function render(container, ctx) {
         if (operation === 'restore' && e.status === 404) {
           pendingRestoreJobId = '';
           setPendingRestoreId('');
+          restoreBusy = false;
+          syncBackupStart();
           statusLine.textContent = '恢复任务状态已过期；请重新验证备份并检查数据。';
           return;
         }
         statusLine.textContent = `读取备份进度失败：${e.message}`;
+      } finally {
+        pollRequestActive = false;
       }
       pollTimer = setTimeout(() => pollJob(jobId, operation), 1000);
     }
 
     startBtn.addEventListener('click', async () => {
+      if (operationBusy()) return;
       const selected = componentInventory.filter((item) => selectedComponents.has(item.id));
       if (!selected.length || selected.some((item) => item.available === false)) {
         statusLine.textContent = '请选择至少一类可用的备份内容。';
         return;
       }
-      startBtn.disabled = true;
+      backupSubmitting = true;
+      syncBackupStart();
       statusLine.textContent = '正在启动备份…';
       try {
         const job = await endpoints.backupStart({
@@ -2183,9 +2228,11 @@ export async function render(container, ctx) {
         renderProgress(job);
         pollJob(job.id);
       } catch (e) {
-        startBtn.disabled = false;
         statusLine.textContent = `启动备份失败：${e.message}`;
         await refreshStatus();
+      } finally {
+        backupSubmitting = false;
+        syncBackupStart();
       }
     });
     refreshBtn.addEventListener('click', refreshStatus);
