@@ -304,6 +304,8 @@ export const endpoints = {
 
   // 渠道/协议：协议目录 + 动态配置 + 运行状态（本轮后端新增接口）
   adapterProtocols: () => api.get('/api/adapters/protocols'),
+  adapterDocs: (id) =>
+    api.get(`/api/adapters/docs/${encodeURIComponent(id)}`),
   adapterConfig: () => api.get('/api/adapters/config'),
   adapterStatus: () => api.get('/api/adapters/status'),
   saveAdapter: (name, payload) =>
@@ -400,6 +402,7 @@ export const endpoints = {
     api.post('/api/update/probe', payload, { timeoutMs: 60000 }),
 
   backupStatus: () => api.get('/api/backup/status'),
+  backupComponents: () => api.get('/api/backup/components'),
   backupStart: (payload = {}) =>
     api.post('/api/backup', payload, { timeoutMs: 60000 }),
   backupJob: (jobId) => api.get(`/api/backup/jobs/${encodeURIComponent(jobId)}`),
@@ -407,6 +410,12 @@ export const endpoints = {
     api.post(`/api/backup/jobs/${encodeURIComponent(jobId)}/cancel`, {}),
   backupVerify: (filename) =>
     api.post('/api/backup/verify', { filename }, { timeoutMs: 300000 }),
+  backupRestorePreview: (payload) =>
+    api.post('/api/backup/restore/preview', payload, { timeoutMs: 300000 }),
+  backupRestore: (payload) =>
+    api.post('/api/backup/restore', payload, { timeoutMs: 600000 }),
+  backupRestoreJob: (jobId) =>
+    api.get(`/api/backup/restore/jobs/${encodeURIComponent(jobId)}`),
   backupDownloadUrl: (name) =>
     `/api/backup/files/${encodeURIComponent(name)}`,
 };

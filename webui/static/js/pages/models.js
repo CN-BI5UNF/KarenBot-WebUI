@@ -34,7 +34,8 @@ export async function render(container, ctx) {
         h('button', {
           class: 'btn btn-primary',
           onclick: async (event) => {
-            event.currentTarget.disabled = true;
+            const button = event.currentTarget;
+            button.disabled = true;
             try {
               await endpoints.restart();
               ctx.toast('Runtime 已重启', 'ok');
@@ -42,7 +43,7 @@ export async function render(container, ctx) {
               fill(hintHost);
             } catch (e) {
               ctx.toast(e.message, 'error');
-              event.currentTarget.disabled = false;
+              button.disabled = false;
             }
           },
         }, '立即重启'),
@@ -152,14 +153,15 @@ export async function render(container, ctx) {
             ? h('button', {
                 class: 'btn btn-primary',
                 onclick: async (event) => {
-                  event.currentTarget.disabled = true;
+                  const button = event.currentTarget;
+                  button.disabled = true;
                   try {
                     const result = await endpoints.installModelDeps(model.name, 'tsinghua');
                     ctx.toast(result.message, 'ok');
                   } catch (e) {
                     ctx.toast(e.message, 'error');
                   } finally {
-                    event.currentTarget.disabled = false;
+                    button.disabled = false;
                   }
                 },
               }, `安装依赖（${model.missing_deps.join(', ')}）`)

@@ -5,11 +5,12 @@
 //   GET /api/adapters/config     当前适配器完整配置（密钥只返回引用 ID）
 //   PUT /api/adapters/{name}     整份保存并热重载
 //   GET /api/adapters/status     连接状态 + 能力表
+//   GET /api/adapters/docs/{id}  协议介绍 Markdown
 //
 // 前端不硬编码协议知识：协议卡片用 protocols[]，表单字段用
 // config_schema.$defs[protocol.config_model]，能力显隐用 capabilities。
 
-import { h, fill, card, empty } from './dom.js';
+import { h, fill, card, empty, modal } from './dom.js';
 import { endpoints } from './api.js';
 import {
   adapterDialectLabel, adapterEndpoint, adapterTransportLabel, adapterTypeLabel,
@@ -423,17 +424,44 @@ export async function renderAdapterPanel(container, ctx, options = {}) {
 
   const cardsHost = h('div', { class: 'protocol-grid' });
 
+  async function showProtocolDocs(protocol) {
+    if (!protocol?.id) return;
+
+    const body = h('div', {}, empty('正在读取协议介绍…'));
+    const view = modal({
+      title: `${protocol.name || '协议'}介绍`,
+      subtitle: protocol.docs || '协议接入说明',
+      body,
+      wide: true,
+      footer: h('button', {
+        class: 'btn',
+        onclick: () => view.close(),
+      }, '关闭'),
+    });
+    document.body.append(view.el);
+
+    try {
+      const result = await endpoints.adapterDocs(protocol.id);
+      const content = typeof result?.content === 'string'
+        ? result.content : (typeof result?.markdown === 'string' ? result.markdown : '');
+      fill(body, content
+        ? h('pre', { class: 'protocol-doc-content' }, content)
+        : empty('协议介绍暂为空'));
+    } catch (e) {
+      fill(body, empty(`无法读取协议介绍：${e.message}`, {
+        subtitle: '请稍后重试，或查看服务端 docs/protocols 目录。',
+      }));
+    }
+  }
+
   function renderProtocolCards() {
     fill(cardsHost, ...protocols.map((protocol) => {
       const meta = PROTOCOL_STATUS[protocol.status] || { label: protocol.status, cls: 'idle' };
       const planned = protocol.status === 'planned';
       const active = protocol.id === selectedType;
-      return h('button', {
-        type: 'button',
+      return h('div', {
         class: `protocol-card ${active ? 'active' : ''} ${planned ? 'planned' : ''}`,
         title: protocol.docs ? `文档：${protocol.docs}` : protocol.name,
-        disabled: planned,
-        onclick: () => selectProtocol(protocol),
       },
         h('div', { class: 'protocol-card-head' },
           h('span', { class: 'protocol-card-name' }, protocol.name),
@@ -444,6 +472,18 @@ export async function renderAdapterPanel(container, ctx, options = {}) {
             h('span', { class: 'protocol-tag' }, optionLabel('transport', item))),
           ...(protocol.dialects || []).slice(0, 3).map((item) =>
             h('span', { class: 'protocol-tag' }, item))),
+        h('div', { class: 'protocol-card-actions' },
+          h('button', {
+            type: 'button',
+            class: 'btn btn-sm',
+            disabled: active || planned,
+            onclick: () => selectProtocol(protocol),
+          }, planned ? '尚未支持' : active ? '已选择' : '选择'),
+          h('button', {
+            type: 'button',
+            class: 'btn btn-sm',
+            onclick: () => showProtocolDocs(protocol),
+          }, '查看介绍')),
       );
     }));
   }

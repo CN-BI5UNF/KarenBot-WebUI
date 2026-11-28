@@ -527,8 +527,49 @@ export function renderEmbedding(host, ctx, state) {
 // 6. 渠道（NapCat）
 // ============================================================
 
+function identifierList(value) {
+  const parts = Array.isArray(value) ? value : String(value || '').split(/[,\s，、]+/u);
+  return [...new Set(parts.map((item) => String(item).trim()).filter(Boolean))];
+}
+
+function identifierText(value) {
+  return Array.isArray(value) ? value.join('\n') : (value || '');
+}
+
+function validateAdapter(adapter) {
+  if (adapter.enabled === false) return null;
+  if (!adapter.host || /\s|\//u.test(adapter.host)) {
+    return '请填写渠道地址，只填主机名或 IP，不要包含 ws://、路径或空格。';
+  }
+  if (!Number.isInteger(adapter.port) || adapter.port < 1 || adapter.port > 65535) {
+    return '渠道端口需要是 1～65535 的整数。';
+  }
+  if (!adapter.path || !adapter.path.startsWith('/')) return '渠道路径需要以 / 开头。';
+  if (adapter.whitelist.mode === 'whitelist') {
+    const ids = [...identifierList(adapter.whitelist.qq_ids),
+      ...identifierList(adapter.whitelist.group_ids)];
+    if (!ids.length) return '白名单模式至少需要填写一个 QQ 号或群号。';
+    if (ids.some((id) => !/^\d+$/u.test(id))) return 'QQ 号和群号只能包含数字，请检查名单。';
+  }
+  return null;
+}
+
 export function renderAdapter(host, ctx, state) {
   const a = state.adapter;
+  const enabled = h('input', {
+    type: 'checkbox', checked: a.enabled !== false,
+    onchange: (event) => { a.enabled = event.target.checked; rerender(ctx); },
+  });
+  const introduction = [
+    h('p', { class: 'card-sub' },
+      '通过 NapCat 收发 QQ 消息。还没准备好可以暂不连接，完成后到「设置 → 渠道与协议」再启用。'),
+    h('label', { class: 'switch' }, enabled, '连接 QQ（NapCat）'),
+  ];
+  if (a.enabled === false) {
+    fill(host, ...introduction,
+      h('p', { class: 'field-help' }, '暂不连接 QQ，现有填写内容会保留；完成配置后仍可使用控制台。'));
+    return { validate: () => null };
+  }
 
   const mode = h('select', {
     onchange: (e) => { a.mode = e.target.value; },
@@ -567,8 +608,7 @@ export function renderAdapter(host, ctx, state) {
   }
 
   const nodes = [
-    h('p', { class: 'card-sub' },
-      '让 Karen 通过 NapCat 收发 QQ 消息。还没装 NapCat 也可以先跳过，之后在设置里配。'),
+    ...introduction,
     field('连接模式', mode),
     h('div', { class: 'grid grid-3' },
       field('地址', hostInput), field('端口', port), field('路径', path),
@@ -581,12 +621,12 @@ export function renderAdapter(host, ctx, state) {
   if (a.whitelist.mode === 'whitelist') {
     const qq = h('textarea', {
       rows: 2, placeholder: '一行一个，或用逗号/空格/顿号分隔',
-      value: (a.whitelist.qq_ids || []).join('\n'),
+      value: identifierText(a.whitelist.qq_ids),
       oninput: (e) => { a.whitelist.qq_ids = e.target.value; },
     });
     const groups = h('textarea', {
       rows: 2, placeholder: '一行一个，或用逗号/空格/顿号分隔',
-      value: (a.whitelist.group_ids || []).join('\n'),
+      value: identifierText(a.whitelist.group_ids),
       oninput: (e) => { a.whitelist.group_ids = e.target.value; },
     });
     nodes.push(
@@ -599,7 +639,7 @@ export function renderAdapter(host, ctx, state) {
   }
 
   fill(host, ...nodes);
-  return { validate: () => null };
+  return { validate: () => validateAdapter(a) };
 }
 
 // ============================================================
@@ -661,37 +701,46 @@ export function renderPersona(host, ctx, state) {
 
 export function renderSummary(host, ctx, state) {
   const rows = [];
-  const add = (label, value) => rows.push(
-    h('tr', {}, h('td', { class: 'stat-label' }, label), h('td', {}, value)),
+  const add = (label, value, step) => rows.push(
+    h('tr', {}, h('td', { class: 'stat-label' }, label), h('td', {}, value),
+      h('td', {}, step && typeof ctx.editStep === 'function'
+        ? h('button', { class: 'btn btn-text btn-sm', type: 'button',
+            onclick: () => ctx.editStep(step), 'aria-label': `修改${label}` }, '修改')
+        : null)),
   );
+  const mainStep = state.path === 'custom' ? 'main_model_custom' : 'main_model_quick';
 
-  add('路径', state.path === 'custom' ? '自定义' : '推荐');
-  add('主模型', `${state.provider.preset || '自定义'} · ${state.provider.model || '（未填）'}`);
+  add('路径', state.path === 'custom' ? '自定义' : '推荐', 'welcome');
+  add('主模型', `${state.provider.preset || '自定义'} · ${state.provider.model || '（未填）'}`, mainStep);
   if (state.provider.base_url) add('Base URL', h('span', { class: 'mono' }, state.provider.base_url));
   add('API Key', state.provider.api_key ? '已填写' : '未填（启动后调用会失败）');
 
   for (const [key, label] of [['proactive', '主动思考'], ['summary', '滚动摘要'],
                               ['persona_gen', '人格生成']]) {
     const cfg = state.agents[key];
-    add(label, cfg && cfg.enabled !== false
-      ? `启用${cfg.model ? ` · ${cfg.model}` : ' · 跟随主模型'}`
-      : '关闭');
+    add(label, cfg !== false && cfg?.enabled !== false
+      ? `启用${cfg?.model ? ` · ${cfg.model}` : ' · 跟随主模型'}`
+      : '关闭', state.path === 'custom' ? 'other_agents' : null);
   }
 
   const enabled = ['vision', 'web_search', 'weather', 'tts']
     .filter((k) => (state.features[k] || {}).enabled);
-  add('功能', enabled.length ? enabled.join('、') : '都关着');
+  add('功能', enabled.length ? enabled.join('、') : '都关着', 'features');
   add('长期记忆', (state.features.long_term_memory || {}).mode === 'rag'
-    ? '向量检索' : '重要记忆文件');
-  add('渠道', `${state.adapter.mode}://${state.adapter.host}:${state.adapter.port}`);
-  add('入站策略', state.adapter.whitelist.mode);
-  add('人格', state.persona);
+    ? '向量检索' : '重要记忆文件', 'embedding');
+  add('渠道', state.adapter.enabled === false ? '暂不连接 QQ'
+    : `${state.adapter.mode}://${state.adapter.host}:${state.adapter.port}`, 'adapter');
+  if (state.adapter.enabled !== false) add('入站策略', state.adapter.whitelist.mode, 'adapter');
+  add('人格', state.persona, 'persona');
 
   const list = h('table', { class: 'table' }, h('tbody', {}, ...rows));
 
   fill(host,
     h('p', { class: 'card-sub' }, '确认一下。点「完成配置」就会写盘并启动 Runtime。'),
     list,
+    h('p', { class: 'field-help' },
+      '子 Agent 默认跟随主模型，主动思考、滚动摘要和人格生成可能额外调用模型并产生费用。'
+      + '如需分别关闭或换模型，可返回选择自定义路径；完成后也可到「模型管理」调整。'),
   );
 
   return {
@@ -699,7 +748,7 @@ export function renderSummary(host, ctx, state) {
       if (!state.provider.api_key) {
         return '还没有填 API Key —— 没有密钥人格无法说话';
       }
-      return null;
+      return validateAdapter(state.adapter);
     },
   };
 }
@@ -801,7 +850,7 @@ export function buildPayload(state) {
     behavior: { max_context_tokens: state.behavior.max_context_tokens ?? null },
     persona: state.persona,
     adapter: {
-      enabled: true,
+      enabled: state.adapter.enabled !== false,
       mode: state.adapter.mode,
       host: state.adapter.host,
       port: state.adapter.port,
@@ -809,8 +858,8 @@ export function buildPayload(state) {
       access_token: state.adapter.access_token || '',
       whitelist: {
         mode: state.adapter.whitelist.mode,
-        qq_ids: state.adapter.whitelist.qq_ids || [],
-        group_ids: state.adapter.whitelist.group_ids || [],
+        qq_ids: identifierList(state.adapter.whitelist.qq_ids),
+        group_ids: identifierList(state.adapter.whitelist.group_ids),
       },
     },
     // 不走 provider 的密钥，由后端统一写进密钥库

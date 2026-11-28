@@ -29,6 +29,9 @@ jobs:
       - name: Compile webui Python
         run: python3 -m compileall -q webui
 
+      - name: Test UI behavior
+        run: node --test tests/ui-behavior.test.mjs
+
       - name: Verify static entry points
         run: |
           python3 - <<'PY'

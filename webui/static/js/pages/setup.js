@@ -32,7 +32,7 @@ export function render(container, ctx) {
     features: {},
     behavior: {},
     adapter: {
-      mode: 'client', host: '127.0.0.1', port: 3000, path: '/',
+      enabled: false, mode: 'client', host: '127.0.0.1', port: 3000, path: '/',
       access_token: '',
       whitelist: { mode: 'verify', qq_ids: [], group_ids: [] },
     },
@@ -59,6 +59,17 @@ export function render(container, ctx) {
   let COPY = {};
 
   let view = null;
+  let ready = false;
+  let disposed = false;
+  const visitedSteps = new Set();
+  const stepCtx = {
+    ...ctx,
+    rerender: rerenderStep,
+    editStep: (stepId) => {
+      if (!visitedSteps.has(stepId)) return;
+      return runAction(() => showStep(stepId));
+    },
+  };
 
   fill(container,
     h('div', { class: 'wizard' },
@@ -87,9 +98,13 @@ export function render(container, ctx) {
   }
 
   async function boot() {
+    state.busy = true;
+    state.error = '';
+    renderError();
     stepHost.replaceChildren(h('div', { class: 'field-help' }, '正在准备…'));
     try {
       const options = await endpoints.setupOptions();
+      if (disposed) return;
       state.presets = options.presets || [];
       state.personas = options.personas || [];
       for (const step of options.steps || []) state.stepsMeta[step.id] = step;
@@ -103,6 +118,7 @@ export function render(container, ctx) {
       if (defaults.model) state.provider.model = defaults.model;
       const adapter = defaults.adapter || {};
       Object.assign(state.adapter, {
+        enabled: adapter.enabled === true,
         mode: adapter.mode || 'client',
         host: adapter.host || '127.0.0.1',
         port: adapter.port || 3000,
@@ -110,7 +126,12 @@ export function render(container, ctx) {
       });
       state.adapter.whitelist.mode = adapter.whitelist_mode || 'verify';
     } catch (e) {
-      fill(stepHost, empty('读不到向导选项', { subtitle: e.message, iconName: 'settings' }));
+      if (disposed) return;
+      state.busy = false;
+      fill(stepHost,
+        empty('读不到向导选项', { subtitle: e.message, iconName: 'settings' }),
+        h('button', { class: 'btn', onclick: boot }, '重新读取向导选项'));
+      renderError();
       return;
     }
 
@@ -120,9 +141,12 @@ export function render(container, ctx) {
     } catch {
       // 文案拉不到不是阻塞问题，按钮用回落的默认中文
     }
+    if (disposed) return;
+    ready = true;
     applyCopy();
-
     await showStep(state.current);
+    state.busy = false;
+    renderError();
   }
 
   async function askFlow(direction) {
@@ -142,8 +166,12 @@ export function render(container, ctx) {
   }
 
   function renderError() {
+    if (disposed) return;
     errorBox.textContent = state.error || '';
-    nextBtn.disabled = state.busy || !!state.error;
+    nextBtn.disabled = state.busy || !ready;
+    backBtn.disabled = state.busy || !ready || state.current === 'welcome';
+    skipBtn.disabled = state.busy || !ready;
+    stepHost.inert = state.busy;
   }
 
   async function showStep(stepId) {
@@ -152,6 +180,8 @@ export function render(container, ctx) {
     }
 
     state.current = stepId;
+    state.isLast = stepId === 'summary';
+    visitedSteps.add(stepId);
     state.error = '';
 
     const meta = state.stepsMeta[stepId] || { title: stepId, subtitle: '' };
@@ -167,22 +197,27 @@ export function render(container, ctx) {
       }));
       view = { validate: () => null };
     } else {
-      view = renderer(stepHost, ctx, state) || { validate: () => null };
+      view = renderer(stepHost, stepCtx, state) || { validate: () => null };
     }
 
     await refreshProgress();
     renderError();
-    backBtn.disabled = state.current === 'welcome';
   }
 
   async function refreshProgress() {
+    const current = state.current;
+    const path = state.path;
+    const source = state.persona_source;
+    const stillCurrent = () => !disposed && state.current === current
+      && state.path === path && state.persona_source === source;
     try {
       const flow = await endpoints.setupStep({
-        current: state.current,
-        path: state.path,
+        current,
+        path,
         direction: 'next',
-        context: { persona_source: state.persona_source },
+        context: { persona_source: source },
       });
+      if (!stillCurrent()) return;
       const [index, total] = flow.progress || [0, 1];
       state.isLast = !!flow.is_last;
       progressText.textContent = `第 ${index} / ${total} 步`;
@@ -193,6 +228,7 @@ export function render(container, ctx) {
         : (COPY['button.next'] || '下一步');
       skipBtn.classList.toggle('hidden', !(state.stepsMeta[state.current] || {}).can_skip);
     } catch (e) {
+      if (!stillCurrent()) return;
       state.error = e.message;
       renderError();
     }
@@ -215,7 +251,7 @@ export function render(container, ctx) {
     const flow = await askFlow('next');
     if (!flow) return;
     if (!flow.next) {
-      await submit();
+      state.error = '无法确定下一步，请重试或返回上一步。';
       return;
     }
     await showStep(flow.next);
@@ -231,14 +267,13 @@ export function render(container, ctx) {
     const flow = await askFlow('next');
     if (!flow) return;
     if (!flow.next) {
-      await submit();
+      state.error = '无法确定下一步，请重试或返回上一步。';
       return;
     }
     await showStep(flow.next);
   }
 
   async function submit() {
-    state.busy = true;
     nextBtn.textContent = '正在写入…';
     renderError();
     try {
@@ -248,35 +283,59 @@ export function render(container, ctx) {
       await ctx.onDone();
     } catch (e) {
       state.error = e.message;
+    }
+  }
+
+  // 导航、写盘期间统一锁定，错误展示不阻止用户修正或重试。
+  async function runAction(action) {
+    if (state.busy || !ready || disposed) return;
+    state.busy = true;
+    state.error = '';
+    renderError();
+    try {
+      await action();
+    } catch (e) {
+      state.error = e.message;
+    } finally {
       state.busy = false;
-      nextBtn.textContent = '完成配置';
+      nextBtn.textContent = state.isLast
+        ? (COPY['summary.start_button'] || '完成配置')
+        : (COPY['button.next'] || '下一步');
       renderError();
     }
   }
 
   async function rerenderStep() {
+    if (state.busy || disposed) return;
     const renderer = STEP_VIEWS[state.current];
     if (!renderer) return;
     state.error = '';
     if (typeof view?.destroy === 'function') {
       try { view.destroy(); } catch (e) { console.error(e); }
     }
-    view = renderer(stepHost, ctx, state) || { validate: () => null };
+    view = renderer(stepHost, stepCtx, state) || { validate: () => null };
+    await refreshProgress();
     renderError();
   }
 
   // 向导步骤里的选择卡/开关需要局部重渲染；由这里统一更新 view，
   // 避免旧的 validate 闭包和 DOM 状态脱节。
-  ctx.rerender = rerenderStep;
-
-  backBtn.onclick = goBack;
-  skipBtn.onclick = skip;
-  nextBtn.onclick = advance;
+  backBtn.onclick = () => runAction(goBack);
+  skipBtn.onclick = () => runAction(skip);
+  nextBtn.onclick = () => runAction(advance);
+  const clearError = () => {
+    if (state.busy || !state.error) return;
+    state.error = '';
+    renderError();
+  };
+  stepHost.addEventListener('input', clearError);
+  stepHost.addEventListener('change', clearError);
 
   boot();
 
   return {
     destroy() {
+      disposed = true;
       if (typeof view?.destroy === 'function') view.destroy();
     },
   };

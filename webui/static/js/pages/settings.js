@@ -136,14 +136,16 @@ export async function render(container, ctx) {
         h('button', {
           class: 'btn btn-primary',
           onclick: async (event) => {
-            event.currentTarget.disabled = true;
+            const button = event.currentTarget;
+            button.disabled = true;
             try {
               await endpoints.restart();
               ctx.toast('Runtime 已重启', 'ok');
               clearRestart();
             } catch (e) {
               ctx.toast(e.message, 'error');
-              event.currentTarget.disabled = false;
+            } finally {
+              button.disabled = false;
             }
           },
         }, '立即重启 Runtime'),
@@ -162,7 +164,8 @@ export async function render(container, ctx) {
         h('button', {
           class: 'btn btn-primary',
           onclick: async (event) => {
-            event.currentTarget.disabled = true;
+            const button = event.currentTarget;
+            button.disabled = true;
             try {
               await promptBackendRestart(ctx, {
                 title: '重启 WebUI 服务？',
@@ -170,7 +173,7 @@ export async function render(container, ctx) {
                 confirmLabel: '立即重启 WebUI',
               });
             } finally {
-              if (event.currentTarget) event.currentTarget.disabled = false;
+              button.disabled = false;
             }
           },
         }, '立即重启 WebUI'),
@@ -181,8 +184,7 @@ export async function render(container, ctx) {
 
   function clearRestart() {
     restartHint = null;
-    webuiRestartHint = null;
-    fill(hintHost);
+    fill(hintHost, webuiRestartHint);
   }
 
   // ============================================================
@@ -190,6 +192,35 @@ export async function render(container, ctx) {
   // ============================================================
 
   function control(fieldSpec, onSave) {
+    const editorHost = h('div', {});
+    const status = h('div', { class: 'field-help', role: 'status', 'aria-live': 'polite' });
+    let saving = false;
+
+    const showEditor = () => fill(editorHost, fieldControl(fieldSpec, commit));
+    const commit = async (value) => {
+      if (saving) return;
+      saving = true;
+      for (const input of editorHost.querySelectorAll('input, select, textarea, button')) {
+        input.disabled = true;
+      }
+      status.className = 'field-help';
+      status.textContent = '正在保存…';
+      const result = await onSave(value);
+      saving = false;
+      // 后端返回规范化值；失败时 fieldSpec.value 仍是最后成功保存的值。
+      showEditor();
+      status.className = `field-help ${result ? (result.needs_restart ? 'warn' : 'ok') : 'bad'}`;
+      status.textContent = result
+        ? (result.needs_restart
+          ? `已保存；重启${result.restart_scope === 'webui' ? ' WebUI 服务' : ' Runtime'}后生效。`
+          : '已保存并生效。')
+        : '保存失败，已恢复到上次保存的值；请修改后重试。';
+    };
+    showEditor();
+    return h('div', {}, editorHost, status);
+  }
+
+  function fieldControl(fieldSpec, onSave) {
     const value = fieldSpec.value;
     const kind = fieldSpec.type;
 
@@ -377,8 +408,10 @@ export async function render(container, ctx) {
       if (containerSetupTrigger) {
         await promptStorageSetup(ctx);
       }
+      return result;
     } catch (e) {
       ctx.toast(`${fieldSpec.label} 保存失败：${e.message}`, 'error');
+      return null;
     }
   }
 
@@ -1583,11 +1616,54 @@ export async function render(container, ctx) {
         empty(`读取备份状态失败：${e.message}`)));
       return;
     }
+    let componentInventory = [];
+    let includeMedia = true;
+    try {
+      const inventory = await endpoints.backupComponents();
+      componentInventory = Array.isArray(inventory.components) ? inventory.components : [];
+      includeMedia = inventory.include_media !== false;
+    } catch (e) {
+      nodes.push(card('备份内容', '', empty(`读取可备份内容失败：${e.message}`)));
+      return;
+    }
+    const selectedComponents = new Set(
+      componentInventory.filter((item) => item.available).map((item) => item.id),
+    );
+    let restoreSelection = null;
+    let restorePreview = null;
+    let restoreFormRevision = 0;
+    let restoreBusy = false;
+    let activeBackupJob = null;
+    const restoreJobStorageKey = 'karenbot.pending-backup-restore';
+    const readPendingRestoreId = () => {
+      try { return globalThis.localStorage?.getItem(restoreJobStorageKey) || ''; }
+      catch { return ''; }
+    };
+    const setPendingRestoreId = (jobId) => {
+      try {
+        if (jobId) globalThis.localStorage?.setItem(restoreJobStorageKey, jobId);
+        else globalThis.localStorage?.removeItem(restoreJobStorageKey);
+      } catch { /* private browsing may disable storage; current page polling still works */ }
+    };
+    let pendingRestoreJobId = readPendingRestoreId();
     let pollTimer = null;
     const statusLine = h('p', { class: 'field-help' });
     const progressHost = h('div', {});
     const filesHost = h('div', {});
     const summaryHost = h('div', {});
+    const componentHost = h('div', { class: 'backup-component-list' });
+    const sizeEstimate = h('p', { class: 'field-help' });
+    const mediaToggle = h('input', { type: 'checkbox', checked: includeMedia });
+    const mediaLabel = h('label', { class: 'backup-component backup-media-option' },
+      mediaToggle,
+      h('span', { class: 'backup-component-label' }, '包含工作区中的入站媒体与附件'),
+      h('span', { class: 'backup-component-size' }, '仅在选择工作区时生效'),
+    );
+    mediaToggle.addEventListener('change', () => {
+      includeMedia = mediaToggle.checked;
+      renderBackupChoices();
+    });
+    const restoreHost = h('div', {});
     const startBtn = h('button', { class: 'btn btn-primary' }, '立即备份');
     const refreshBtn = h('button', { class: 'btn' }, '刷新');
 
@@ -1598,23 +1674,70 @@ export async function render(container, ctx) {
       }
     }
 
+    function estimatedBytes(item) {
+      if (item.id === 'workspace') {
+        if (includeMedia && Number.isFinite(Number(item.bytes_with_media))) {
+          return Number(item.bytes_with_media);
+        }
+        if (!includeMedia && Number.isFinite(Number(item.bytes_without_media))) {
+          return Number(item.bytes_without_media);
+        }
+        if (!includeMedia && Number.isFinite(Number(item.media_bytes))) {
+          return Math.max(0, Number(item.bytes || 0) - Number(item.media_bytes));
+        }
+      }
+      return Number(item.bytes ?? item.estimated_bytes ?? 0);
+    }
+
+    function syncBackupStart() {
+      const selected = componentInventory.filter((item) => selectedComponents.has(item.id));
+      startBtn.disabled = selected.length === 0 || selected.some((item) => item.available === false)
+        || Boolean(activeBackupJob)
+        || (status.jobs || []).some((job) => ['running', 'queued', 'cancelling'].includes(job.state));
+      mediaToggle.disabled = !selectedComponents.has('workspace')
+        || Boolean(activeBackupJob)
+        || (status.jobs || []).some((job) => ['running', 'queued', 'cancelling'].includes(job.state));
+    }
+
     function renderProgress(job) {
       if (!job) {
         fill(progressHost);
-        startBtn.disabled = false;
+        syncBackupStart();
         return;
       }
       const total = Number(job.total_bytes || 0);
-      const done = Number(job.processed_bytes || 0);
+      const done = Number(job.processed_bytes ?? job.progress ?? 0);
       const pct = total > 0 ? Math.max(0, Math.min(100, Math.round(done / total * 100))) : 0;
       const stateText = BACKUP_STATE_TEXT[job.state] || job.state;
       const stageText = BACKUP_STAGE_TEXT[job.stage] || job.stage;
       const running = ['running', 'queued', 'cancelling'].includes(job.state);
+      if (job.operation !== 'restore') activeBackupJob = running ? job : null;
+      if (job.operation === 'restore') {
+        restoreBusy = running;
+        if (!running && restoreSelection) {
+          restorePreview = null;
+          renderRestoreSelection();
+        }
+      }
       const line = running
         ? `${stateText} · ${stageText}`
           + (total > 0 ? ` · ${formatBytes(done)} / ${formatBytes(total)}` : '')
         : `${stateText}${job.filename ? ` · ${job.filename}` : ''}`;
+      const componentProgress = Array.isArray(job.components)
+        && job.components.some((item) => item && typeof item === 'object')
+        ? job.components
+        : Object.entries(job.component_progress || {}).map(([id, item]) => {
+          const previewItem = job.operation === 'restore'
+            ? restorePreview?.components?.find((entry) => entry.id === id) : null;
+          return {
+            id,
+            label: previewItem?.label || componentInventory.find((entry) => entry.id === id)?.label || id,
+            archive_bytes: previewItem?.archive_bytes,
+            ...item,
+          };
+        });
       const cancelBtn = running && job.state !== 'cancelling'
+        && job.operation !== 'restore'
         ? h('button', { class: 'btn btn-sm' }, '取消备份')
         : null;
       if (cancelBtn) {
@@ -1645,6 +1768,18 @@ export async function render(container, ctx) {
             }))
           : null,
         job.current ? h('p', { class: 'field-help mono' }, job.current) : null,
+        componentProgress.length
+          ? table(['内容', '预计大小', '已处理', '实际大小'], componentProgress.map((item) =>
+            h('tr', {},
+              h('td', {}, item.label || item.id),
+              h('td', {}, formatBytes(item.estimated_bytes ?? item.archive_bytes ?? 0)),
+              h('td', {}, formatBytes(item.processed_bytes ?? item.bytes ?? item.actual_bytes ?? 0)),
+              h('td', {}, formatBytes(item.actual_bytes ?? item.bytes ?? item.archive_bytes ?? 0)),
+            )))
+          : null,
+        job.rollback_filename
+          ? h('p', { class: 'field-help' }, `恢复前自动创建回滚备份：${job.rollback_filename}`)
+          : null,
         ...(job.warnings || []).map((warning) =>
           h('p', { class: 'field-help' }, warning)),
         job.error
@@ -1653,17 +1788,222 @@ export async function render(container, ctx) {
           : null,
       );
       startBtn.disabled = running;
+      if (job.operation !== 'restore') syncBackupStart();
       if (job.state === 'done') {
-        statusLine.textContent = `备份完成：${job.filename}（${formatBytes(job.size)}）`;
+        statusLine.textContent = job.operation === 'restore'
+          ? `恢复完成${job.rollback_filename ? `；回滚备份：${job.rollback_filename}` : ''}`
+          : `备份完成：${job.filename}（${formatBytes(job.size)}）`;
       } else if (job.state === 'partial') {
-        statusLine.textContent = `备份部分完成：${job.filename}（${formatBytes(job.size)}），请查看警告`;
+        statusLine.textContent = job.operation === 'restore'
+          ? '恢复部分完成，请查看警告和回滚备份信息。'
+          : `备份部分完成：${job.filename}（${formatBytes(job.size)}），请查看警告`;
       } else if (job.state === 'failed') {
-        statusLine.textContent = `备份失败：${job.error?.message || '未知错误'}`;
+        statusLine.textContent = `${job.operation === 'restore' ? '恢复' : '备份'}失败：${job.error?.message || '未知错误'}`;
       } else if (job.state === 'cancelled') {
         statusLine.textContent = '备份已取消，未生成可下载文件。';
       } else if (job.state === 'interrupted') {
-        statusLine.textContent = '上次备份被服务重启中断；可重新发起备份。';
+        statusLine.textContent = `${job.operation === 'restore' ? '恢复' : '备份'}被服务重启中断；请检查当前数据和回滚备份。`;
       }
+    }
+
+    function renderComponentChoices(host, items, selected, {
+      kind = 'backup', onChange = () => {},
+    } = {}) {
+      const rows = items.map((item) => {
+        const id = item.id || item.component;
+        const available = item.available !== false && item.restorable !== false;
+        const checked = selected.has(id);
+        const checkbox = h('input', {
+          type: 'checkbox', checked,
+          disabled: !available || restoreBusy || (kind === 'backup' && Boolean(activeBackupJob)),
+          onchange: () => {
+            if (checkbox.checked) selected.add(id);
+            else selected.delete(id);
+            onChange();
+          },
+        });
+        const size = kind === 'restore'
+          ? `备份 ${formatBytes(item.archive_bytes ?? item.bytes)} · 当前 ${formatBytes(item.target_bytes)}`
+          : formatBytes(estimatedBytes(item));
+        const extra = kind === 'restore'
+          ? ` · ${Number(item.files || 0)} 个文件 · ${Number(item.overwrite_files || 0)} 个覆盖 · ${Number(item.delete_files || 0)} 个删除`
+          : '';
+        return h('label', { class: `backup-component ${available ? '' : 'is-unavailable'}` },
+          checkbox,
+          h('span', { class: 'backup-component-label' }, item.label || id),
+          h('span', { class: 'backup-component-size' }, size + extra),
+          !available ? h('span', { class: 'field-help' }, item.reason || '不可用/不可恢复') : null,
+        );
+      });
+      fill(host, ...rows);
+    }
+
+    function renderBackupChoices() {
+      renderComponentChoices(componentHost, componentInventory, selectedComponents, {
+        onChange: () => {
+          const selectedBytes = componentInventory
+            .filter((item) => selectedComponents.has(item.id))
+            .reduce((sum, item) => sum + estimatedBytes(item), 0);
+          syncBackupStart();
+          sizeEstimate.textContent = `已选 ${selectedComponents.size} 项 · 约 ${formatBytes(selectedBytes)}；`
+            + '实际压缩包大小会因数据结构与压缩率不同而变化。';
+        },
+      });
+      const selectedBytes = componentInventory
+        .filter((item) => selectedComponents.has(item.id))
+        .reduce((sum, item) => sum + estimatedBytes(item), 0);
+      syncBackupStart();
+      sizeEstimate.textContent = `已选 ${selectedComponents.size} 项 · 约 ${formatBytes(selectedBytes)}；`
+        + '实际压缩包大小会因数据结构与压缩率不同而变化。';
+    }
+
+    function renderRestoreSelection() {
+      const formRevision = ++restoreFormRevision;
+      if (!restoreSelection) {
+        fill(restoreHost);
+        return;
+      }
+      const selection = restoreSelection;
+      const { filename, report, selected } = selection;
+      let previewRevision = 0;
+      let previewedComponents = null;
+      // A late preview must never authorize a newer form or changed selection.
+      const currentForm = () => formRevision === restoreFormRevision
+        && restoreSelection === selection;
+      const selectionKey = (components) => JSON.stringify([...components].sort());
+      const currentPreview = () => currentForm() && restorePreview?.ok
+        && restorePreview.filename === filename
+        && previewedComponents !== null
+        && selectionKey(selected) === selectionKey(previewedComponents);
+      const candidates = (report.components || []).filter((item) => item.available !== false);
+      const choiceHost = h('div', { class: 'backup-component-list' });
+      const previewBtn = h('button', { class: 'btn' }, '预览所选恢复内容');
+      const confirmInput = h('input', { type: 'text', autocomplete: 'off', placeholder: '输入确认短语' });
+      const restoreBtn = h('button', { class: 'btn btn-danger', disabled: true }, '立即恢复');
+      const previewSummary = h('div', { class: 'backup-restore-preview' });
+      const localStatus = h('p', { class: 'field-help' });
+
+      const syncConfirmation = () => {
+        const required = restorePreview?.confirmation_phrase || '';
+        restoreBtn.disabled = restoreBusy || !currentPreview()
+          || !required || confirmInput.value.trim() !== required;
+      };
+      confirmInput.addEventListener('input', syncConfirmation);
+      previewBtn.addEventListener('click', async () => {
+        if (!selected.size) {
+          localStatus.textContent = '至少选择一类要恢复的内容。';
+          return;
+        }
+        const requestRevision = ++previewRevision;
+        const requestedComponents = [...selected];
+        restorePreview = null;
+        previewedComponents = null;
+        confirmInput.value = '';
+        syncConfirmation();
+        previewBtn.disabled = true;
+        localStatus.textContent = '正在检查备份并计算覆盖范围…';
+        try {
+          const preview = await endpoints.backupRestorePreview({
+            filename, components: requestedComponents,
+          });
+          if (!currentForm() || requestRevision !== previewRevision) return;
+          const returnedComponents = Array.isArray(preview.components)
+            ? preview.components.map((item) => item.id) : [];
+          if (preview.filename !== filename
+            || selectionKey(returnedComponents) !== selectionKey(requestedComponents)) {
+            throw new Error('恢复预览与所选备份或类别不一致，请重新预览');
+          }
+          restorePreview = preview;
+          previewedComponents = requestedComponents;
+          fill(previewSummary,
+            table(['内容', '备份大小', '当前大小', '文件变化'],
+              (restorePreview.components || []).map((item) =>
+                h('tr', {},
+                  h('td', {}, item.label || item.id),
+                  h('td', {}, formatBytes(item.archive_bytes)),
+                  h('td', {}, formatBytes(item.target_bytes)),
+                  h('td', {}, `${Number(item.overwrite_files || 0)} 覆盖 · ${Number(item.delete_files || 0)} 删除`),
+                ))),
+            h('p', { class: 'field-help backup-warning' },
+              '同路径文件会被备份内容覆盖，新文件会加入；目标中的其他文件会保留。执行前自动创建回滚备份，Runtime 会短暂停止并尝试重新启动。'),
+            ...(restorePreview.warnings || []).map((warning) => h('p', { class: 'field-help' }, warning)),
+            restorePreview.confirmation_phrase
+              ? h('p', { class: 'field-help' }, `确认短语：${restorePreview.confirmation_phrase}`) : null,
+          );
+          confirmInput.value = '';
+          syncConfirmation();
+          localStatus.textContent = restorePreview.ok
+            ? '预览完成。核对覆盖范围后输入确认短语。'
+            : '所选内容未通过恢复检查，不能继续。';
+        } catch (e) {
+          if (!currentForm() || requestRevision !== previewRevision) return;
+          restorePreview = null;
+          previewedComponents = null;
+          fill(previewSummary);
+          syncConfirmation();
+          localStatus.textContent = `恢复预览失败：${e.message}`;
+        } finally {
+          previewBtn.disabled = false;
+        }
+      });
+      restoreBtn.addEventListener('click', async () => {
+        if (restoreBtn.disabled || !currentPreview()) return;
+        const payload = {
+          filename: restorePreview.filename,
+          components: [...previewedComponents],
+          confirmation: restorePreview.confirmation_phrase,
+        };
+        restoreBusy = true;
+        previewBtn.disabled = true;
+        restoreBtn.disabled = true;
+        confirmInput.disabled = true;
+        for (const checkbox of choiceHost.querySelectorAll('input')) checkbox.disabled = true;
+        let restoreJobStarted = false;
+        localStatus.textContent = '正在启动恢复；请不要关闭页面…';
+        try {
+          const job = await endpoints.backupRestore(payload);
+          restoreJobStarted = true;
+          restoreBusy = true;
+          pendingRestoreJobId = job.id;
+          setPendingRestoreId(job.id);
+          statusLine.textContent = `恢复任务已启动：${job.id}`;
+          renderProgress(job);
+          pollJob(job.id, 'restore');
+        } catch (e) {
+          localStatus.textContent = `恢复启动失败：${e.message}`;
+        } finally {
+          if (!restoreJobStarted) {
+            restoreBusy = false;
+            confirmInput.disabled = false;
+            previewBtn.disabled = false;
+            for (const checkbox of choiceHost.querySelectorAll('input')) checkbox.disabled = false;
+            syncConfirmation();
+          }
+        }
+      });
+
+      renderComponentChoices(choiceHost, candidates, selected, {
+        kind: 'restore',
+        onChange: () => {
+          previewRevision++;
+          restorePreview = null;
+          previewedComponents = null;
+          confirmInput.value = '';
+          fill(previewSummary);
+          syncConfirmation();
+          localStatus.textContent = '选择已变化，请重新生成恢复预览。';
+        },
+      });
+      fill(restoreHost,
+        h('div', { class: 'backup-restore-panel' },
+          h('p', { class: 'field-help' }, `恢复备份：${filename}`),
+          h('p', { class: 'field-help backup-warning' },
+            '仅覆盖归档中的同路径文件并添加归档内新文件，其他本机文件会保留。开始前会生成回滚备份。'),
+          choiceHost,
+          h('div', { class: 'row row-wrap' }, previewBtn, confirmInput, restoreBtn),
+          previewSummary,
+          localStatus,
+        ));
     }
 
     function renderFiles() {
@@ -1675,6 +2015,8 @@ export async function render(container, ctx) {
       fill(filesHost, h('div', { class: 'backup-file-list' },
         ...files.map((file) => {
           const verifyBtn = h('button', { class: 'btn btn-sm' }, '离线验证');
+          const restoreBtn = h('button', { class: 'btn btn-sm' }, '选择恢复');
+          const fileDetails = h('div', { class: 'backup-component-details' });
           verifyBtn.addEventListener('click', async () => {
             verifyBtn.disabled = true;
             statusLine.textContent = `正在验证 ${file.filename}…`;
@@ -1688,10 +2030,47 @@ export async function render(container, ctx) {
                 + ` · 聊天可恢复=${report.chat_restorable ? '是' : '否'}`
                 + ` · 凭据可恢复=${report.credential_restorable ? '是' : '否'}`
                 + (problems.length ? ` · ${problems.slice(0, 2).join('；')}` : '');
+              fill(fileDetails, ...(report.components || []).map((item) =>
+                h('p', { class: 'field-help' },
+                  `${item.label || item.id} · ${formatBytes(item.archive_bytes)} `
+                  + (item.restorable === false ? '· 不可恢复' : '· 可恢复'))));
             } catch (e) {
               statusLine.textContent = `验证失败：${e.message}`;
             } finally {
               verifyBtn.disabled = false;
+            }
+          });
+          restoreBtn.addEventListener('click', async () => {
+            if (restoreBusy) return;
+            restoreBtn.disabled = true;
+            // Invalidate the old form before verifying the newly chosen file.
+            restoreSelection = null;
+            restorePreview = null;
+            renderRestoreSelection();
+            const requestRevision = restoreFormRevision;
+            statusLine.textContent = `正在读取 ${file.filename} 的内容…`;
+            try {
+              const report = await endpoints.backupVerify(file.filename);
+              if (requestRevision !== restoreFormRevision) return;
+              if (!report.ok || !Array.isArray(report.components)) {
+                throw new Error((report.errors || []).map((item) => item.message).join('；')
+                  || '备份无法验证，不能恢复');
+              }
+              const selected = new Set(
+                report.components.filter((item) => item.available !== false
+                  && item.restorable !== false).map((item) => item.id),
+              );
+              if (!selected.size) throw new Error('此备份没有支持的一键恢复内容');
+              restoreSelection = { filename: file.filename, report, selected };
+              restorePreview = null;
+              renderRestoreSelection();
+              statusLine.textContent = '请勾选要恢复的类别并查看覆盖预览。';
+              restoreHost.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+            } catch (e) {
+              if (requestRevision !== restoreFormRevision) return;
+              statusLine.textContent = `无法准备恢复：${e.message}`;
+            } finally {
+              restoreBtn.disabled = false;
             }
           });
           return h('div', { class: 'backup-file' },
@@ -1706,7 +2085,9 @@ export async function render(container, ctx) {
                   ? ' · 已验证' : ' · 未完整验证')
                 + (file.partial ? ' · 部分完成' : '')),
             ),
+            fileDetails,
             verifyBtn,
+            restoreBtn,
             h('a', {
               class: 'btn btn-sm',
               href: endpoints.backupDownloadUrl(file.filename),
@@ -1721,20 +2102,31 @@ export async function render(container, ctx) {
       const active = (status.jobs || []).find(
         (job) => ['running', 'queued', 'cancelling'].includes(job.state),
       ) || null;
-      startBtn.disabled = !!active;
+      if (active?.operation === 'restore') {
+        restoreBusy = true;
+        renderBackupChoices();
+      } else if (active?.operation !== 'restore') {
+        restoreBusy = false;
+      }
+      activeBackupJob = active?.operation === 'restore' ? null : active;
+      syncBackupStart();
       fill(summaryHost, table(['项目', '值'], [
         h('tr', {}, h('td', {}, '备份目录'),
           h('td', { class: 'mono' }, status.directory)),
         h('tr', {}, h('td', {}, '入站媒体'),
-          h('td', {}, status.include_media ? '包含' : '不包含')),
+          h('td', {}, includeMedia ? '包含' : '不包含')),
+        h('tr', {}, h('td', {}, '可选备份内容'),
+          h('td', {}, `${componentInventory.filter((item) => item.available).length} 类 · 总计约 ${formatBytes(componentInventory.reduce((sum, item) => sum + estimatedBytes(item), 0))}`)),
         h('tr', {}, h('td', {}, '上次备份'),
           h('td', {}, status.files?.[0]
             ? `${status.files[0].filename}（${formatBytes(status.files[0].size)}）`
             : '还没有备份')),
       ]));
+      syncBackupStart();
       renderFiles();
       renderProgress(active);
-      if (active && !pollTimer) pollJob(active.id);
+      if (active && !pollTimer) pollJob(active.id, active.operation === 'restore' ? 'restore' : 'backup');
+      else if (!active && pendingRestoreJobId && !pollTimer) pollJob(pendingRestoreJobId, 'restore');
     }
 
     async function refreshStatus() {
@@ -1746,29 +2138,47 @@ export async function render(container, ctx) {
       }
     }
 
-    async function pollJob(jobId) {
+    async function pollJob(jobId, operation = 'backup') {
       clearPoll();
-      if (!startBtn.isConnected) return;
+      if (startBtn.isConnected === false) return;
       try {
-        const job = await endpoints.backupJob(jobId);
+        const job = operation === 'restore'
+          ? await endpoints.backupRestoreJob(jobId)
+          : await endpoints.backupJob(jobId);
         renderProgress(job);
         if (BACKUP_TERMINAL_STATES.has(job.state)) {
+          if (operation === 'restore' && pendingRestoreJobId === jobId) {
+            pendingRestoreJobId = '';
+            setPendingRestoreId('');
+          }
           await refreshStatus();
           return;
         }
       } catch (e) {
+        if (operation === 'restore' && e.status === 404) {
+          pendingRestoreJobId = '';
+          setPendingRestoreId('');
+          statusLine.textContent = '恢复任务状态已过期；请重新验证备份并检查数据。';
+          return;
+        }
         statusLine.textContent = `读取备份进度失败：${e.message}`;
       }
-      pollTimer = setTimeout(() => pollJob(jobId), 1000);
+      pollTimer = setTimeout(() => pollJob(jobId, operation), 1000);
     }
 
     startBtn.addEventListener('click', async () => {
+      const selected = componentInventory.filter((item) => selectedComponents.has(item.id));
+      if (!selected.length || selected.some((item) => item.available === false)) {
+        statusLine.textContent = '请选择至少一类可用的备份内容。';
+        return;
+      }
       startBtn.disabled = true;
       statusLine.textContent = '正在启动备份…';
       try {
-        // 不传 include_media：让后端读取当前配置，避免字段刚保存但面板状态
-        // 还是旧值时用旧覆盖值启动备份。
-        const job = await endpoints.backupStart({});
+        const job = await endpoints.backupStart({
+          components: [...selectedComponents],
+          include_media: selectedComponents.has('workspace') && includeMedia,
+        });
         statusLine.textContent = '';
         renderProgress(job);
         pollJob(job.id);
@@ -1781,25 +2191,28 @@ export async function render(container, ctx) {
     refreshBtn.addEventListener('click', refreshStatus);
 
     nodes.push(card('一键备份用户数据',
-      '备份配置、加密密钥、聊天/RAG 数据库、工作区、表情包、自定义预设和人格。'
+      '选择配置、凭据、聊天、RAG、工作区、表情包、自定义预设或人格数据。'
       + '各 SQLite 库分别一致性快照，不是跨库全局事务；备份后的新消息不会包含在内。',
       h('p', { class: 'field-help backup-warning' },
         '安全提示：备份包含加密 API 密钥库和 RSA 私钥，拿到它就可能解密模型密钥。'
         + 'ZIP 本身未加密，0600 只是本机文件权限；请像密码一样保管，'
         + '不要上传到公共网盘或通过不安全渠道发送。'),
       summaryHost,
+      h('h3', { class: 'card-title' }, '选择要备份的内容'),
+      componentHost,
+      mediaLabel,
+      sizeEstimate,
       h('div', { class: 'row' },
         h('div', { class: 'spacer' }),
         refreshBtn,
         startBtn),
       statusLine,
       progressHost,
+      restoreHost,
       h('h2', { class: 'card-title', style: { marginTop: '16px' } }, '已有备份'),
       filesHost,
-      h('p', { class: 'field-help' },
-        '恢复为手动操作：停止服务后按压缩包内 README_RESTORE.txt 操作；'
-        + '本页不提供在线一键恢复。'),
     ));
+    renderBackupChoices();
     renderSummary();
   }
 
@@ -2109,7 +2522,9 @@ export async function render(container, ctx) {
         }, '← 返回'),
         h('div', {},
           h('h1', { class: 'page-title' }, '设置'),
-          h('p', { class: 'page-desc' }, '改动即时写入 config.yaml；需要重启的会给出提示。'),
+          h('p', { class: 'page-desc' },
+            '普通开关和选项修改后自动保存；文本移开焦点或按 Enter 保存。多行文本用 Ctrl+Enter。'
+            + '带“保存”按钮的面板需单独保存；字段下方会显示结果，需要重启的会保留提示。'),
         ),
       ),
     ),
